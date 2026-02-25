@@ -55,7 +55,7 @@ npm test
 ### Node.js
 
 ```javascript
-import { SearchEngine } from '@obinexuscomputing/nexus-search';
+import { SearchEngine } from '@obinexusmk2/nexus-search';
 
 const engine = new SearchEngine(config);
 await engine.initialize();
@@ -65,7 +65,7 @@ const results = await engine.search('query');
 ### Browser
 
 ```javascript
-import { SearchEngine } from '@obinexuscomputing/nexus-search';
+import { SearchEngine } from '@obinexusmk2/nexus-search';
 
 const engine = new SearchEngine({
   storage: { type: 'indexeddb' },
