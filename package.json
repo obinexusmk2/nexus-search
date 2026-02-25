@@ -97,7 +97,7 @@
     "node": ">=18.0.0"
   },
   "keywords": [
-    "@obinexuscomputing/nexus-search",
+    "@obinexusmk2/nexus-search",
     "nexus-search",
     "avl-trie",
     "bfs",
@@ -125,6 +125,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://gitlab.com/obinexuscomputing.pkg/nexus-search"
+    "url": "https://github.com/obinexusmk2/nexus-search"
   }
 }
