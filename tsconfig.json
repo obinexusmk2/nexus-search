@@ -1,0 +1,62 @@
+{
+  "compilerOptions": {
+    // === TARGET CONFIGURATION ===
+    "target": "es2018",
+    "module": "esnext",
+    "lib": ["dom", "dom.iterable", "esnext"],
+
+    // === OUTPUT CONFIGURATION ===
+    "declaration": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declarationMap": true,
+
+    // === LANGUAGE & ENVIRONMENT ===
+    "strict": true,
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+
+    // === PATH ALIASES - OBINexus Build Orchestration ===
+    // Root /src alias ensures proper module resolution for build pipeline
+    // Maps both with and without trailing slashes for compatibility
+    "baseUrl": ".",
+    "paths": {
+      "/*": ["src/*"],
+      "@/*": ["src/core/*"],
+      "@src": ["src"],
+      "@src/*": ["src/*"],
+      "@src/cli": ["src/cli"],
+      "@src/cli/*": ["src/cli/*"],
+      "@src/core": ["src/core"],
+      "@src/core/*": ["src/core/*"],
+      "@core/*": ["src/core/*"],
+      "@algorithms/*": ["src/core/algorithms/*"],
+      "@search/*": ["src/core/search/*"],
+      "@storage/*": ["src/core/storage/*"],
+      "@utils/*": ["src/core/utils/*"],
+      "@documents/*": ["src/core/documents/*"],
+      "@types/*": ["src/core/types/*"],
+      "@telemetry/*": ["src/core/telemetry/*"],
+      "@adapters/*": ["src/core/adapters/*"],
+      "@browser/*": ["src/core/adapters/browser/*"],
+      "@node/*": ["src/core/adapters/node/*"],
+      "@web/*": ["src/core/web/*"],
+      "@cli/*": ["src/cli/*"],
+      "@mappers/*": ["src/core/mappers/*"]
+    }
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.spec.ts"
+  ]
+}
