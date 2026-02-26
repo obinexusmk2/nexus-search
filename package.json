@@ -2,7 +2,6 @@
   "name": "@obinexusmk2/nexus-search",
   "version": "0.4.0",
   "description": "A high-performance search indexing and query system using a self-balancing AVL-Trie with BFS/DFS algorithms for fast full-text search, fuzzy matching, real-time updates, and cross-platform file system support.",
-  "type": "module",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -16,7 +15,7 @@
   },
   "bin": {
     "nsc": "dist/cli/index.js",
-    "nscli": "dist/cli/index.js"
+    "nscli": "dist/cli/index.cjs"
   },
   "files": [
     "dist/",
