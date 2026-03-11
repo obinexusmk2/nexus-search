@@ -275,6 +275,18 @@ export default [
     }
   },
 
+  // CLI executable - CJS build (required by bin.nscli → dist/cli/index.cjs in package.json)
+  {
+    ...cliConfig,
+    output: {
+      ...baseOutput,
+      file: 'dist/cli/index.cjs',
+      format: 'cjs',
+      exports: 'auto',
+      banner: '#!/usr/bin/env node\n' + banner
+    }
+  },
+
   // Type definitions bundle for core library
   {
     input: 'src/index.ts',

@@ -5,7 +5,9 @@
  * @license MIT
  * OBINexus: Build 2026-03-11T01:47:13.731Z
  */
-import { openDB } from 'idb';
+'use strict';
+
+var idb = require('idb');
 
 class TrieNode {
     constructor(depth = 0) {
@@ -1953,7 +1955,7 @@ class SearchStorage {
             return;
         }
         try {
-            this.db = await openDB('nexus-search-db', 1, {
+            this.db = await idb.openDB('nexus-search-db', 1, {
                 upgrade(db) {
                     const indexStore = db.createObjectStore('searchIndices', { keyPath: 'id' });
                     indexStore.createIndex('timestamp', 'timestamp');
@@ -4488,7 +4490,7 @@ class IndexedDBAdapter {
     }
     async initializeDB() {
         try {
-            this.db = await openDB(this.dbName, this.dbVersion, {
+            this.db = await idb.openDB(this.dbName, this.dbVersion, {
                 upgrade(db) {
                     // Create stores if they don't exist
                     if (!db.objectStoreNames.contains('searchIndices')) {
@@ -5194,5 +5196,6 @@ if (require.main === module) {
     })().catch(console.error);
 }
 
-export { SearchCLI, SearchCLI as SearchCLIDefault };
-//# sourceMappingURL=index.js.map
+exports.SearchCLI = SearchCLI;
+exports.SearchCLIDefault = SearchCLI;
+//# sourceMappingURL=index.cjs.map
