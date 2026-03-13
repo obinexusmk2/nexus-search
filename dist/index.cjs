@@ -2,7 +2,7 @@
  * @obinexusmk2/nexus-search v0.4.0
  * A high-performance search indexing and query system using a self-balancing AVL-Trie with BFS/DFS algorithms for fast full-text search, fuzzy matching, real-time updates, and cross-platform file system support.
  * @license MIT
- * OBINexus: Build 2026-03-11T01:47:13.731Z
+ * OBINexus: Build 2026-03-13T11:59:44.395Z
  */
 'use strict';
 

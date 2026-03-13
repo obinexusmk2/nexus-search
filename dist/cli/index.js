@@ -3,9 +3,638 @@
  * @obinexusmk2/nexus-search v0.4.0
  * A high-performance search indexing and query system using a self-balancing AVL-Trie with BFS/DFS algorithms for fast full-text search, fuzzy matching, real-time updates, and cross-platform file system support.
  * @license MIT
- * OBINexus: Build 2026-03-11T01:47:13.731Z
+ * OBINexus: Build 2026-03-13T11:59:44.395Z
  */
 import { openDB } from 'idb';
+
+/**
+ * Breadth-First Search traversal for trie data structure
+ * Optimized for relevance-focused search results
+ *
+ * @param root The root node of the trie
+ * @param query The search query
+ * @param maxResults Maximum number of results to return (default: 10)
+ * @param config Optional configuration for the traversal
+ * @returns Array of search results with document IDs and scores
+ */
+function bfsTraversal(root, query, maxResults = 10, config) {
+    const results = [];
+    const queue = [];
+    // Set default configuration
+    const traversalConfig = {
+        maxDepth: (config === null || config === void 0 ? void 0 : config.maxDepth) || 50,
+        timeoutMs: (config === null || config === void 0 ? void 0 : config.timeoutMs) || 5000,
+        caseSensitive: (config === null || config === void 0 ? void 0 : config.caseSensitive) || false,
+        wholeWord: (config === null || config === void 0 ? void 0 : config.wholeWord) || false
+    };
+    // Start time for timeout checking
+    const startTime = Date.now();
+    // Process query based on case sensitivity setting
+    const processedQuery = traversalConfig.caseSensitive ? query : query.toLowerCase();
+    // Initialize queue with root node
+    queue.push({ node: root, path: [], depth: 0 });
+    // Maps to track visited nodes and prevent duplicates
+    const visited = new Set();
+    const foundDocIds = new Set();
+    // BFS traversal loop
+    while (queue.length > 0 && results.length < maxResults) {
+        // Check for timeout
+        if (Date.now() - startTime > traversalConfig.timeoutMs) {
+            break;
+        }
+        const { node, path, depth } = queue.shift();
+        // Skip if beyond max depth
+        if (depth > traversalConfig.maxDepth) {
+            continue;
+        }
+        // Check if this node matches the query
+        if (node.id && matchesQuery$1(path.join(''), processedQuery, traversalConfig)) {
+            // Add this document to results if not already found
+            if (!foundDocIds.has(node.id)) {
+                foundDocIds.add(node.id);
+                // Calculate positions for highlighting
+                const positions = getMatchPositions$1(path.join(''), processedQuery);
+                results.push({
+                    id: node.id,
+                    score: node.score,
+                    path: [...path],
+                    matches: [path.join('')],
+                    positions,
+                    matched: path.join('')
+                });
+            }
+        }
+        // Add all children to the queue (breadth-first)
+        for (const [char, childNode] of node.children.entries()) {
+            const newPath = [...path, char];
+            const pathKey = newPath.join('');
+            // Skip already visited paths
+            if (visited.has(pathKey)) {
+                continue;
+            }
+            visited.add(pathKey);
+            queue.push({
+                node: childNode,
+                path: newPath,
+                depth: depth + 1
+            });
+        }
+    }
+    // Sort results by score (descending)
+    return results.sort((a, b) => b.score - a.score).slice(0, maxResults);
+}
+/**
+ * Specialized BFS traversal for regex pattern matching
+ *
+ * @param root The root node of the trie
+ * @param regex Regular expression pattern to match
+ * @param maxResults Maximum number of results to return
+ * @param config Optional configuration
+ * @returns Array of search results matching the regex pattern
+ */
+function bfsRegexTraversal$1(root, regex, maxResults = 10, config) {
+    const results = [];
+    const queue = [];
+    // Set default configuration
+    const traversalConfig = {
+        maxDepth: (config === null || config === void 0 ? void 0 : config.maxDepth) || 50,
+        timeoutMs: (config === null || config === void 0 ? void 0 : config.timeoutMs) || 5000,
+        caseSensitive: (config === null || config === void 0 ? void 0 : config.caseSensitive) || false,
+        wholeWord: (config === null || config === void 0 ? void 0 : config.wholeWord) || false
+    };
+    // Start time for timeout checking
+    const startTime = Date.now();
+    // Initialize queue with root node
+    queue.push({ node: root, path: [], depth: 0 });
+    // Maps to track visited nodes and prevent duplicates
+    const visited = new Set();
+    const foundDocIds = new Set();
+    // BFS traversal loop with regex matching
+    while (queue.length > 0 && results.length < maxResults) {
+        // Check for timeout
+        if (Date.now() - startTime > traversalConfig.timeoutMs) {
+            break;
+        }
+        const { node, path, depth } = queue.shift();
+        // Skip if beyond max depth
+        if (depth > traversalConfig.maxDepth) {
+            continue;
+        }
+        const currentString = path.join('');
+        // Check if this path matches the regex
+        if (node.id && regex.test(currentString)) {
+            // Add this document to results if not already found
+            if (!foundDocIds.has(node.id)) {
+                foundDocIds.add(node.id);
+                // Find all matches within the string
+                const matches = [];
+                let match;
+                const clonedRegex = new RegExp(regex.source, regex.flags);
+                while ((match = clonedRegex.exec(currentString)) !== null) {
+                    matches.push(match[0]);
+                    // Prevent infinite loops for zero-length matches
+                    if (match.index === clonedRegex.lastIndex) {
+                        clonedRegex.lastIndex++;
+                    }
+                }
+                // Calculate positions for matches
+                const positions = getRegexPositions$1(currentString, regex);
+                results.push({
+                    id: node.id,
+                    score: node.score,
+                    path: [...path],
+                    matches: matches.length > 0 ? matches : [currentString],
+                    positions,
+                    matched: currentString
+                });
+            }
+        }
+        // Add all children to the queue (breadth-first)
+        for (const [char, childNode] of node.children.entries()) {
+            const newPath = [...path, char];
+            const pathKey = newPath.join('');
+            // Skip already visited paths
+            if (visited.has(pathKey)) {
+                continue;
+            }
+            visited.add(pathKey);
+            queue.push({
+                node: childNode,
+                path: newPath,
+                depth: depth + 1
+            });
+        }
+    }
+    // Sort results by score (descending)
+    return results.sort((a, b) => b.score - a.score).slice(0, maxResults);
+}
+/**
+ * Checks if a string matches a query based on traversal configuration
+ */
+function matchesQuery$1(str, query, config) {
+    if (config.wholeWord) {
+        return str === query;
+    }
+    return str.includes(query);
+}
+/**
+ * Gets the positions of matches for highlighting
+ */
+function getMatchPositions$1(str, query, config) {
+    const positions = [];
+    let index = 0;
+    while ((index = str.indexOf(query, index)) !== -1) {
+        positions.push([index, index + query.length]);
+        index += query.length;
+    }
+    return positions;
+}
+/**
+ * Gets the positions of regex matches for highlighting
+ */
+function getRegexPositions$1(str, regex) {
+    const positions = [];
+    const clonedRegex = new RegExp(regex.source, regex.flags + 'g');
+    let match;
+    while ((match = clonedRegex.exec(str)) !== null) {
+        positions.push([match.index, match.index + match[0].length]);
+        // Prevent infinite loops for zero-length matches
+        if (match.index === clonedRegex.lastIndex) {
+            clonedRegex.lastIndex++;
+        }
+    }
+    return positions;
+}
+
+/**
+ * Depth-First Search traversal for trie data structure
+ * Optimized for speed-focused search results and complex pattern matching
+ *
+ * @param root The root node of the trie
+ * @param query The search query
+ * @param maxResults Maximum number of results to return (default: 10)
+ * @param config Optional configuration for the traversal
+ * @returns Array of search results with document IDs and scores
+ */
+function dfsTraversal(root, query, maxResults = 10, config) {
+    // Results array to collect matches
+    const results = [];
+    // Set default configuration
+    const traversalConfig = {
+        maxDepth: (config === null || config === void 0 ? void 0 : config.maxDepth) || 50,
+        timeoutMs: (config === null || config === void 0 ? void 0 : config.timeoutMs) || 5000,
+        caseSensitive: (config === null || config === void 0 ? void 0 : config.caseSensitive) || false,
+        wholeWord: (config === null || config === void 0 ? void 0 : config.wholeWord) || false
+    };
+    // Process query based on case sensitivity setting
+    const processedQuery = traversalConfig.caseSensitive ? query : query.toLowerCase();
+    // Maps to track visited nodes and found documents
+    const visited = new Set();
+    const foundDocIds = new Set();
+    // Start time for timeout checking
+    const startTime = Date.now();
+    // Internal recursive DFS function
+    function dfs(node, path, depth) {
+        // Exit conditions
+        if (results.length >= maxResults ||
+            depth > traversalConfig.maxDepth ||
+            Date.now() - startTime > traversalConfig.timeoutMs) {
+            return;
+        }
+        const pathKey = path.join('');
+        // Skip already visited paths
+        if (visited.has(pathKey)) {
+            return;
+        }
+        visited.add(pathKey);
+        // Check if this node matches the query
+        if (node.id && matchesQuery(pathKey, processedQuery, traversalConfig)) {
+            // Add this document to results if not already found
+            if (!foundDocIds.has(node.id)) {
+                foundDocIds.add(node.id);
+                // Calculate positions for highlighting
+                const positions = getMatchPositions(pathKey, processedQuery);
+                results.push({
+                    id: node.id,
+                    score: node.score,
+                    path: [...path],
+                    matches: [pathKey],
+                    positions,
+                    matched: pathKey
+                });
+                // If we've reached the max results, exit early
+                if (results.length >= maxResults) {
+                    return;
+                }
+            }
+        }
+        // Explore children in depth-first order (could be optimized with heuristics)
+        for (const [char, childNode] of node.children.entries()) {
+            dfs(childNode, [...path, char], depth + 1);
+            // Exit early if we've reached max results
+            if (results.length >= maxResults) {
+                return;
+            }
+        }
+    }
+    // Start the DFS traversal from the root
+    dfs(root, [], 0);
+    // Sort results by score (descending)
+    return results.sort((a, b) => b.score - a.score).slice(0, maxResults);
+}
+/**
+ * Specialized DFS traversal for regex pattern matching
+ * Better suited for complex regex patterns than BFS
+ *
+ * @param root The root node of the trie
+ * @param regex Regular expression pattern to match
+ * @param maxResults Maximum number of results to return
+ * @param config Optional configuration
+ * @returns Array of search results matching the regex pattern
+ */
+function dfsRegexTraversal$1(root, regex, maxResults = 10, config) {
+    // Results array to collect matches
+    const results = [];
+    // Set default configuration
+    const traversalConfig = {
+        maxDepth: (config === null || config === void 0 ? void 0 : config.maxDepth) || 50,
+        timeoutMs: (config === null || config === void 0 ? void 0 : config.timeoutMs) || 5000,
+        caseSensitive: (config === null || config === void 0 ? void 0 : config.caseSensitive) || false,
+        wholeWord: (config === null || config === void 0 ? void 0 : config.wholeWord) || false
+    };
+    // Maps to track visited nodes and found documents
+    const visited = new Set();
+    const foundDocIds = new Set();
+    // Start time for timeout checking
+    const startTime = Date.now();
+    // Internal recursive DFS function with regex matching
+    function dfsRegex(node, path, depth) {
+        // Exit conditions
+        if (results.length >= maxResults ||
+            depth > traversalConfig.maxDepth ||
+            Date.now() - startTime > traversalConfig.timeoutMs) {
+            return;
+        }
+        const currentString = path.join('');
+        // Skip already visited paths
+        if (visited.has(currentString)) {
+            return;
+        }
+        visited.add(currentString);
+        // Check if this path matches the regex
+        if (node.id && regex.test(currentString)) {
+            // Add this document to results if not already found
+            if (!foundDocIds.has(node.id)) {
+                foundDocIds.add(node.id);
+                // Find all matches within the string
+                const matches = [];
+                let match;
+                const clonedRegex = new RegExp(regex.source, regex.flags);
+                while ((match = clonedRegex.exec(currentString)) !== null) {
+                    matches.push(match[0]);
+                    // Prevent infinite loops for zero-length matches
+                    if (match.index === clonedRegex.lastIndex) {
+                        clonedRegex.lastIndex++;
+                    }
+                }
+                // Calculate positions for matches
+                const positions = getRegexPositions(currentString, regex);
+                results.push({
+                    id: node.id,
+                    score: node.score,
+                    path: [...path],
+                    matches: matches.length > 0 ? matches : [currentString],
+                    positions,
+                    matched: currentString
+                });
+                // If we've reached the max results, exit early
+                if (results.length >= maxResults) {
+                    return;
+                }
+            }
+        }
+        // Optimization: Check if continuing this path could potentially match the regex
+        // For simple regex patterns, we can check if any prefix of the pattern matches the current path
+        if (!couldMatchRegex(currentString, regex) && depth > 2) {
+            return;
+        }
+        // Explore children in depth-first order
+        for (const [char, childNode] of node.children.entries()) {
+            dfsRegex(childNode, [...path, char], depth + 1);
+            // Exit early if we've reached max results
+            if (results.length >= maxResults) {
+                return;
+            }
+        }
+    }
+    // Start the DFS traversal from the root
+    dfsRegex(root, [], 0);
+    // Sort results by score (descending)
+    return results.sort((a, b) => b.score - a.score).slice(0, maxResults);
+}
+/**
+ * Checks if a string matches a query based on traversal configuration
+ */
+function matchesQuery(str, query, config) {
+    if (config.wholeWord) {
+        return str === query;
+    }
+    return str.includes(query);
+}
+/**
+ * Gets the positions of matches for highlighting
+ */
+function getMatchPositions(str, query, config) {
+    const positions = [];
+    let index = 0;
+    while ((index = str.indexOf(query, index)) !== -1) {
+        positions.push([index, index + query.length]);
+        index += query.length;
+    }
+    return positions;
+}
+/**
+ * Gets the positions of regex matches for highlighting
+ */
+function getRegexPositions(str, regex) {
+    const positions = [];
+    const clonedRegex = new RegExp(regex.source, regex.flags + 'g');
+    let match;
+    while ((match = clonedRegex.exec(str)) !== null) {
+        positions.push([match.index, match.index + match[0].length]);
+        // Prevent infinite loops for zero-length matches
+        if (match.index === clonedRegex.lastIndex) {
+            clonedRegex.lastIndex++;
+        }
+    }
+    return positions;
+}
+/**
+ * Optimization to determine if continuing a path could potentially match the regex
+ * This is a heuristic that works well for simple patterns but may need refinement for complex patterns
+ */
+function couldMatchRegex(currentString, regex) {
+    // For complex patterns, we conservatively return true to avoid false negatives
+    if (isComplexRegex(regex)) {
+        return true;
+    }
+    // For simple patterns, we check if any prefix of the regex could match the current string
+    const regexString = regex.source;
+    // Check for simple prefixes that might match
+    if (regexString.startsWith('^')) {
+        // If the regex starts with ^, current string must match the beginning
+        const withoutCaret = regexString.substring(1);
+        const firstLiteralPart = withoutCaret.split(/[\[\(\.\*\+\?\|\{\^]/)[0];
+        if (firstLiteralPart && !currentString.startsWith(firstLiteralPart)) {
+            return false;
+        }
+    }
+    // Check for non-pattern characters that must be present
+    const literalParts = regexString.split(/[\[\(\.\*\+\?\|\{\^\$]/);
+    for (const part of literalParts) {
+        if (part.length > 2 && !currentString.includes(part)) {
+            return false;
+        }
+    }
+    return true;
+}
+/**
+ * Checks if a regex pattern is complex
+ */
+function isComplexRegex(regex) {
+    const pattern = regex.source;
+    return (
+    // Check for complex regex features
+    pattern.includes('{') || // Quantifiers
+        pattern.includes('+') || // One or more
+        pattern.includes('*') || // Zero or more
+        pattern.includes('?') || // Optional
+        pattern.includes('|') || // Alternation
+        pattern.includes('(?') || // Non-capturing groups
+        pattern.includes('[') || // Character classes
+        pattern.length > 20 // Long patterns are considered complex
+    );
+}
+
+/**
+ * Calculates the Levenshtein distance between two strings
+ * This is the minimum number of single-character edits required to change one string into the other
+ *
+ * @param s1 First string
+ * @param s2 Second string
+ * @returns Edit distance value
+ */
+function calculateLevenshteinDistance$1(s1, s2) {
+    // Handle edge cases
+    if (!s1 || !s2) {
+        return Math.max((s1 === null || s1 === void 0 ? void 0 : s1.length) || 0, (s2 === null || s2 === void 0 ? void 0 : s2.length) || 0);
+    }
+    // Create a matrix of size (s1.length+1) x (s2.length+1)
+    const dp = Array(s1.length + 1)
+        .fill(0)
+        .map(() => Array(s2.length + 1).fill(0));
+    // Initialize first row and column
+    for (let i = 0; i <= s1.length; i++) {
+        dp[i][0] = i;
+    }
+    for (let j = 0; j <= s2.length; j++) {
+        dp[0][j] = j;
+    }
+    // Fill in the rest of the matrix
+    for (let i = 1; i <= s1.length; i++) {
+        for (let j = 1; j <= s2.length; j++) {
+            // Calculate cost of substitution
+            const substitutionCost = s1[i - 1] !== s2[j - 1] ? 1 : 0;
+            // Choose minimum cost operation: deletion, insertion, or substitution
+            dp[i][j] = Math.min(dp[i - 1][j] + 1, // deletion
+            dp[i][j - 1] + 1, // insertion
+            dp[i - 1][j - 1] + substitutionCost // substitution
+            );
+        }
+    }
+    // Return final distance
+    return dp[s1.length][s2.length];
+}
+/**
+ * Recursive fuzzy search implementation for tries
+ * Uses depth-first search to find approximate matches
+ *
+ * @param node Current trie node
+ * @param current Current accumulated string
+ * @param currentDistance Current edit distance
+ * @param depth Current depth in the trie
+ * @param state Search state object containing parameters and results
+ */
+function fuzzySearchRecursive(node, current, currentDistance, depth, state) {
+    // Terminate if we've exceeded maximum allowed distance
+    if (currentDistance > state.maxDistance) {
+        return;
+    }
+    // Check if this node represents a complete word
+    if (node.isEndOfWord) {
+        // Calculate exact Levenshtein distance between target word and current path
+        const distance = calculateLevenshteinDistance$1(state.word, current);
+        // If within acceptable distance, add document references to results
+        if (distance <= state.maxDistance) {
+            node.documentRefs.forEach((docId) => {
+                // Calculate score based on distance and node properties
+                const score = calculateFuzzyScore(node, current, distance);
+                // Add to results
+                state.results.push({
+                    id: docId,
+                    docId,
+                    score,
+                    term: current,
+                    distance,
+                    matches: [current],
+                    document: { id: docId },
+                    item: current,
+                    metadata: { lastModified: Date.now() }
+                });
+            });
+        }
+    }
+    // Explore all possible edit operations recursively
+    node.children.forEach((child, char) => {
+        // 1. Substitution - replace current character with child character
+        const substitutionCost = char !== state.word[depth] ? 1 : 0;
+        fuzzySearchRecursive(child, current + char, currentDistance + substitutionCost, depth + 1, state);
+        // 2. Insertion - add child character
+        fuzzySearchRecursive(child, current + char, currentDistance + 1, depth, state);
+        // 3. Deletion - skip current character in target word
+        if (depth < state.word.length) {
+            fuzzySearchRecursive(node, current, currentDistance + 1, depth + 1, state);
+        }
+    });
+}
+/**
+ * Calculate score for fuzzy match based on node properties and edit distance
+ *
+ * @param node The matching trie node
+ * @param term The matched term
+ * @param distance Edit distance between query and term
+ * @returns Normalized score between 0 and 1
+ */
+function calculateFuzzyScore(node, term, distance) {
+    // Base score from node weight and frequency
+    const baseScore = node.getScore();
+    // Penalty based on edit distance (exponential decay)
+    const distancePenalty = Math.exp(-Math.max(0.001, distance));
+    // Length normalization (shorter matches get slight preference)
+    const lengthNormalization = 1 / Math.sqrt(Math.max(1, term.length));
+    // Position boost (earlier positions in the word are more significant)
+    const positionBoost = 1 / (node.depth + 1);
+    // Combine factors 
+    return baseScore * distancePenalty * lengthNormalization * positionBoost;
+}
+/**
+ * Priority-based fuzzy search that optimizes for specific fuzzy matching scenarios
+ *
+ * @param targetWord Word to search for
+ * @param candidates Array of candidate words to match against
+ * @param maxDistance Maximum Levenshtein distance to consider
+ * @returns Array of matches with distances and similarities
+ */
+function priorityFuzzyMatch(targetWord, candidates, maxDistance = 2) {
+    const results = [];
+    // Process all candidates
+    for (const candidate of candidates) {
+        // Calculate distance
+        const distance = calculateLevenshteinDistance$1(targetWord, candidate);
+        // Skip if beyond maximum distance
+        if (distance > maxDistance) {
+            continue;
+        }
+        // Calculate similarity score based on relative distance
+        const similarity = 1 - (distance / Math.max(targetWord.length, candidate.length));
+        // Add to results
+        results.push({
+            word: candidate,
+            distance,
+            similarity
+        });
+    }
+    // Sort by similarity (highest first)
+    return results.sort((a, b) => b.similarity - a.similarity);
+}
+/**
+ * Utility function to determine if a word is a potential fuzzy match
+ * Can be used to quickly filter candidates before full distance calculation
+ *
+ * @param target Target word
+ * @param candidate Candidate word
+ * @param maxDistance Maximum allowed distance
+ * @returns Boolean indicating if the candidate could be a fuzzy match
+ */
+function isPotentialFuzzyMatch(target, candidate, maxDistance) {
+    // Quick length check
+    const lengthDiff = Math.abs(target.length - candidate.length);
+    if (lengthDiff > maxDistance) {
+        return false;
+    }
+    // Check if prefixes are close enough (avoid full calculation)
+    const prefixLength = Math.min(3, Math.floor(target.length / 2));
+    if (prefixLength > 0) {
+        const targetPrefix = target.substring(0, prefixLength);
+        const candidatePrefix = candidate.substring(0, prefixLength);
+        const prefixDistance = calculateLevenshteinDistance$1(targetPrefix, candidatePrefix);
+        if (prefixDistance > Math.floor(maxDistance / 2)) {
+            return false;
+        }
+    }
+    // Check if some characters are common
+    const targetSet = new Set(target.split(''));
+    const candidateSet = new Set(candidate.split(''));
+    let commonChars = 0;
+    for (const char of targetSet) {
+        if (candidateSet.has(char)) {
+            commonChars++;
+        }
+    }
+    // Require at least some character overlap
+    const minCommonChars = Math.floor(Math.min(target.length, candidate.length) / 3);
+    return commonChars >= minCommonChars;
+}
 
 class TrieNode {
     constructor(depth = 0) {
@@ -1924,6 +2553,135 @@ class CacheManager {
     }
 }
 
+class IndexedDB {
+    constructor() {
+        this.db = null;
+        this.DB_NAME = 'nexus_search_db';
+        this.DB_VERSION = 1;
+        this.initPromise = null;
+        this.initPromise = this.initialize();
+    }
+    async initialize() {
+        if (this.db)
+            return;
+        try {
+            this.db = await openDB(this.DB_NAME, this.DB_VERSION, {
+                upgrade(db) {
+                    // Handle version upgrades
+                    if (!db.objectStoreNames.contains('searchIndices')) {
+                        const indexStore = db.createObjectStore('searchIndices', { keyPath: 'id' });
+                        indexStore.createIndex('timestamp', 'timestamp');
+                    }
+                    if (!db.objectStoreNames.contains('metadata')) {
+                        const metaStore = db.createObjectStore('metadata', { keyPath: 'id' });
+                        metaStore.createIndex('lastUpdated', 'lastUpdated');
+                    }
+                },
+                blocked() {
+                    console.warn('Database upgrade was blocked');
+                },
+                blocking() {
+                    console.warn('Current database version is blocking a newer version');
+                },
+                terminated() {
+                    console.error('Database connection was terminated');
+                }
+            });
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            throw new Error(`Storage initialization failed: ${message}`);
+        }
+    }
+    async ensureConnection() {
+        if (this.initPromise) {
+            await this.initPromise;
+        }
+        if (!this.db) {
+            throw new Error('Database connection not available');
+        }
+    }
+    async storeIndex(key, data) {
+        await this.ensureConnection();
+        try {
+            const entry = {
+                id: key,
+                data,
+                timestamp: Date.now(),
+            };
+            await this.db.put('searchIndices', entry);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            throw new Error(`Failed to store index: ${message}`);
+        }
+    }
+    async getIndex(key) {
+        var _a;
+        await this.ensureConnection();
+        try {
+            const entry = await this.db.get('searchIndices', key);
+            return (_a = entry === null || entry === void 0 ? void 0 : entry.data) !== null && _a !== void 0 ? _a : null;
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            throw new Error(`Failed to retrieve index: ${message}`);
+        }
+    }
+    async updateMetadata(config) {
+        await this.ensureConnection();
+        try {
+            const metadata = {
+                id: 'config',
+                config,
+                lastUpdated: Date.now()
+            };
+            await this.db.put('metadata', metadata);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            throw new Error(`Failed to update metadata: ${message}`);
+        }
+    }
+    async getMetadata() {
+        await this.ensureConnection();
+        try {
+            const result = await this.db.get('metadata', 'config');
+            return result !== null && result !== void 0 ? result : null;
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            throw new Error(`Failed to retrieve metadata: ${message}`);
+        }
+    }
+    async clearIndices() {
+        await this.ensureConnection();
+        try {
+            await this.db.clear('searchIndices');
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            throw new Error(`Failed to clear indices: ${message}`);
+        }
+    }
+    async deleteIndex(key) {
+        await this.ensureConnection();
+        try {
+            await this.db.delete('searchIndices', key);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            throw new Error(`Failed to delete index: ${message}`);
+        }
+    }
+    async close() {
+        if (this.db) {
+            this.db.close();
+            this.db = null;
+        }
+    }
+}
+
 class SearchStorage {
     constructor(options = {
         type: 'memory'
@@ -2589,6 +3347,77 @@ function findMatchPositions(text, regex) {
     }
     return positions;
 }
+/**
+ * Optimizes an array of indexable documents
+ */
+function optimizeIndex(data) {
+    if (!Array.isArray(data)) {
+        return {
+            data: [],
+            stats: { originalSize: 0, optimizedSize: 0, compressionRatio: 1 }
+        };
+    }
+    try {
+        const uniqueMap = new Map();
+        data.forEach(item => {
+            const key = JSON.stringify(sortObjectKeys(item));
+            uniqueMap.set(key, item);
+        });
+        const sorted = Array.from(uniqueMap.values())
+            .sort((a, b) => generateSortKey(a).localeCompare(generateSortKey(b)));
+        return {
+            data: sorted,
+            stats: {
+                originalSize: data.length,
+                optimizedSize: sorted.length,
+                compressionRatio: data.length ? sorted.length / data.length : 1
+            }
+        };
+    }
+    catch (error) {
+        console.warn('Error optimizing index:', error);
+        return {
+            data,
+            stats: {
+                originalSize: data.length,
+                optimizedSize: data.length,
+                compressionRatio: 1
+            }
+        };
+    }
+}
+/**
+ * Helper function to sort object keys recursively
+ */
+function sortObjectKeys(obj) {
+    if (!obj || typeof obj !== 'object') {
+        return obj;
+    }
+    if (Array.isArray(obj)) {
+        return obj.map(sortObjectKeys);
+    }
+    return Object.keys(obj)
+        .sort()
+        .reduce((sorted, key) => {
+        const value = obj[key];
+        sorted[key] = typeof value === 'object' && value !== null ? sortObjectKeys(value) : value;
+        return sorted;
+    }, {});
+}
+/**
+ * Helper function to generate consistent sort keys for documents
+ */
+function generateSortKey(doc) {
+    if (!(doc === null || doc === void 0 ? void 0 : doc.id) || !doc.content) {
+        return '';
+    }
+    try {
+        return `${doc.id}:${Object.keys(doc.content).sort().join(',')}`;
+    }
+    catch (_a) {
+        return doc.id;
+    }
+}
 function createSearchableFields(document, fields) {
     if (!(document === null || document === void 0 ? void 0 : document.content)) {
         return {};
@@ -2734,6 +3563,463 @@ function extractMatches(document, query, fields, options = {}) {
         }
     }
     return Array.from(matches);
+}
+
+let PerformanceMonitor$1 = class PerformanceMonitor {
+    constructor() {
+        this.metrics = new Map();
+    }
+    async measure(name, fn) {
+        const start = performance.now();
+        try {
+            return await fn();
+        }
+        finally {
+            const duration = performance.now() - start;
+            this.recordMetric(name, duration);
+        }
+    }
+    recordMetric(name, duration) {
+        if (!this.metrics.has(name)) {
+            this.metrics.set(name, []);
+        }
+        this.metrics.get(name).push(duration);
+    }
+    getMetrics() {
+        const results = {};
+        this.metrics.forEach((durations, name) => {
+            results[name] = {
+                avg: this.average(durations),
+                min: Math.min(...durations),
+                max: Math.max(...durations),
+                count: durations.length
+            };
+        });
+        return results;
+    }
+    average(numbers) {
+        return numbers.reduce((a, b) => a + b, 0) / numbers.length;
+    }
+    clear() {
+        this.metrics.clear();
+    }
+};
+
+function validateSearchOptions$2(options) {
+    if (options.maxResults && options.maxResults < 1) {
+        throw new Error('maxResults must be greater than 0');
+    }
+    if (options.threshold && (options.threshold < 0 || options.threshold > 1)) {
+        throw new Error('threshold must be between 0 and 1');
+    }
+    if (options.fields && !Array.isArray(options.fields)) {
+        throw new Error('fields must be an array');
+    }
+}
+function validateIndexConfig(config) {
+    if (!config.name) {
+        throw new Error('Index name is required');
+    }
+    if (!config.version || typeof config.version !== 'number') {
+        throw new Error('Valid version number is required');
+    }
+    if (!Array.isArray(config.fields) || config.fields.length === 0) {
+        throw new Error('At least one field must be specified for indexing');
+    }
+}
+function validateDocument(document, fields) {
+    return fields.every(field => {
+        const value = getNestedValue(document.content, field);
+        return value !== undefined;
+    });
+}
+
+var ValidationUtils = /*#__PURE__*/Object.freeze({
+    __proto__: null,
+    validateDocument: validateDocument,
+    validateIndexConfig: validateIndexConfig,
+    validateSearchOptions: validateSearchOptions$2
+});
+
+class ScoringUtils {
+    /**
+     * Calculates document ranks using a PageRank-inspired algorithm
+     * @param documents Map of document IDs to their content
+     * @param links Array of document links representing relationships
+     * @returns Map of document IDs to their calculated ranks
+     */
+    static calculateDocumentRanks(documents, links) {
+        const documentRanks = new Map();
+        const adjacencyMap = new Map();
+        // Initialize ranks and adjacency
+        for (const docId of documents.keys()) {
+            documentRanks.set(docId, {
+                id: docId,
+                rank: 1 / documents.size,
+                incomingLinks: 0,
+                outgoingLinks: 0,
+                content: {}
+            });
+            adjacencyMap.set(docId, new Set());
+        }
+        // Build links
+        for (const link of links) {
+            const fromRank = documentRanks.get(link.fromId);
+            const toRank = documentRanks.get(link.toId);
+            if (fromRank && toRank && adjacencyMap.has(link.fromId)) {
+                adjacencyMap.get(link.fromId).add(link.toId);
+                fromRank.outgoingLinks++;
+                toRank.incomingLinks++;
+            }
+        }
+        // Iterative calculation
+        let iteration = 0;
+        let maxDiff = 1;
+        while (iteration < this.MAX_ITERATIONS && maxDiff > this.CONVERGENCE_THRESHOLD) {
+            maxDiff = 0;
+            const newRanks = new Map();
+            for (const [docId, docRank] of documentRanks) {
+                let newRank = (1 - this.DAMPING_FACTOR) / documents.size;
+                // Calculate contribution from incoming links
+                for (const [fromId, toIds] of adjacencyMap.entries()) {
+                    if (toIds.has(docId)) {
+                        const fromRank = documentRanks.get(fromId).rank;
+                        const outgoingCount = documentRanks.get(fromId).outgoingLinks;
+                        newRank += this.DAMPING_FACTOR * (fromRank / outgoingCount);
+                    }
+                }
+                newRanks.set(docId, newRank);
+                maxDiff = Math.max(maxDiff, Math.abs(newRank - docRank.rank));
+            }
+            // Update ranks
+            for (const [docId, newRank] of newRanks) {
+                const docRank = documentRanks.get(docId);
+                docRank.rank = newRank;
+            }
+            iteration++;
+        }
+        return documentRanks;
+    }
+    /**
+     * Calculates Term Frequency-Inverse Document Frequency (TF-IDF)
+     * @param term Search term
+     * @param document Current document content
+     * @param documents All documents map
+     * @returns TF-IDF score
+     */
+    static calculateTfIdf(term, document, documents) {
+        const tf = this.calculateTermFrequency(term, document);
+        const idf = this.calculateInverseDocumentFrequency(term, documents);
+        return tf * idf;
+    }
+    /**
+     * Calculates term frequency in a document
+     */
+    static calculateTermFrequency(term, document) {
+        const text = JSON.stringify(document).toLowerCase();
+        const termCount = (text.match(new RegExp(term.toLowerCase(), 'g')) || []).length;
+        const totalWords = text.split(/\s+/).length;
+        return termCount / totalWords;
+    }
+    /**
+     * Calculates inverse document frequency
+     */
+    static calculateInverseDocumentFrequency(term, documents) {
+        let documentCount = 0;
+        const termLower = term.toLowerCase();
+        for (const doc of documents.values()) {
+            const text = JSON.stringify(doc).toLowerCase();
+            if (text.includes(termLower)) {
+                documentCount++;
+            }
+        }
+        return Math.log(documents.size / (1 + documentCount));
+    }
+    /**
+     * Combines multiple scoring factors to create a final relevance score
+     * @param textScore Base text matching score
+     * @param documentRank PageRank-like score for the document
+     * @param termFrequency Term frequency in the document
+     * @param inverseDocFreq Inverse document frequency
+     * @returns Combined relevance score
+     */
+    static calculateCombinedScore(textScore, documentRank, termFrequency, inverseDocFreq) {
+        const weights = {
+            textMatch: 0.3,
+            documentRank: 0.2,
+            tfIdf: 0.5
+        };
+        const tfIdfScore = termFrequency * inverseDocFreq;
+        return (weights.textMatch * textScore +
+            weights.documentRank * documentRank +
+            weights.tfIdf * tfIdfScore);
+    }
+    /**
+     * Adjusts scores based on document freshness
+     * @param baseScore Original relevance score
+     * @param documentDate Document creation/update date
+     * @param maxAge Maximum age in days for full score
+     * @returns Adjusted score based on freshness
+     */
+    static adjustScoreByFreshness(baseScore, documentDate, maxAge = 365) {
+        const ageInDays = (Date.now() - documentDate.getTime()) / (1000 * 60 * 60 * 24);
+        const freshnessMultiplier = Math.max(0, 1 - (ageInDays / maxAge));
+        return baseScore * (0.7 + 0.3 * freshnessMultiplier);
+    }
+}
+ScoringUtils.DAMPING_FACTOR = 0.85;
+ScoringUtils.MAX_ITERATIONS = 100;
+ScoringUtils.CONVERGENCE_THRESHOLD = 0.0001;
+
+class AlgoUtils {
+    /**
+     * Performs Breadth-First Search traversal on a trie structure
+     * @param root Starting node of the trie
+     * @param searchText Text to search for
+     * @param maxResults Maximum number of results to return
+     * @returns Array of matching document IDs with their scores
+     */
+    static bfsTraversal(root, searchText, maxResults = 10) {
+        const results = [];
+        const queue = [];
+        const visited = new Set();
+        // Initialize queue with root node
+        queue.push({ node: root, depth: 0, matched: '' });
+        while (queue.length > 0 && results.length < maxResults) {
+            const item = queue.shift();
+            if (!item)
+                break;
+            const { node, depth, matched } = item;
+            // Check if we've found a complete match
+            if (matched === searchText && node.id && !visited.has(node.id)) {
+                results.push({ id: node.id, score: node.score });
+                visited.add(node.id);
+            }
+            // Add children to queue
+            for (const [char, childNode] of node.children.entries()) {
+                const nextMatched = matched + char;
+                // Only continue if the matched string is a prefix of searchText
+                if (searchText.startsWith(nextMatched)) {
+                    queue.push({
+                        node: childNode,
+                        depth: depth + 1,
+                        matched: nextMatched
+                    });
+                }
+            }
+        }
+        return results.sort((a, b) => b.score - a.score);
+    }
+    /**
+     * Performs Depth-First Search traversal on a trie structure
+     * @param root Starting node of the trie
+     * @param searchText Text to search for
+     * @param maxResults Maximum number of results to return
+     * @returns Array of matching document IDs with their scores
+     */
+    static dfsTraversal(root, searchText, maxResults = 10) {
+        const results = [];
+        const visited = new Set();
+        function dfs(node, depth, matched) {
+            // Stop if we've found enough results
+            if (results.length >= maxResults)
+                return;
+            // Check if we've found a complete match
+            if (matched === searchText && node.id && !visited.has(node.id)) {
+                results.push({ id: node.id, score: node.score });
+                visited.add(node.id);
+                return;
+            }
+            // Explore children
+            for (const [char, childNode] of node.children.entries()) {
+                const nextMatched = matched + char;
+                // Only continue if the matched string is a prefix of searchText
+                if (searchText.startsWith(nextMatched)) {
+                    dfs(childNode, depth + 1, nextMatched);
+                }
+            }
+        }
+        dfs(root, 0, '');
+        return results.sort((a, b) => b.score - a.score);
+    }
+    /**
+     * Performs fuzzy matching using Levenshtein distance
+     * @param root Starting node of the trie
+     * @param searchText Text to search for
+     * @param maxDistance Maximum edit distance allowed
+     * @param maxResults Maximum number of results to return
+     * @returns Array of matching document IDs with their scores and distances
+     */
+    static fuzzySearch(root, searchText, maxDistance = 2, maxResults = 10) {
+        const results = [];
+        const visited = new Set();
+        function calculateLevenshteinDistance(s1, s2) {
+            const dp = Array(s1.length + 1)
+                .fill(null)
+                .map(() => Array(s2.length + 1).fill(0));
+            for (let i = 0; i <= s1.length; i++)
+                dp[i][0] = i;
+            for (let j = 0; j <= s2.length; j++)
+                dp[0][j] = j;
+            for (let i = 1; i <= s1.length; i++) {
+                for (let j = 1; j <= s2.length; j++) {
+                    const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
+                    dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+                }
+            }
+            return dp[s1.length][s2.length];
+        }
+        function fuzzyDfs(node, currentWord) {
+            if (results.length >= maxResults)
+                return;
+            if (node.id && !visited.has(node.id)) {
+                const distance = calculateLevenshteinDistance(currentWord, searchText);
+                if (distance <= maxDistance) {
+                    results.push({
+                        id: node.id,
+                        score: node.score * (1 - distance / maxDistance),
+                        distance
+                    });
+                    visited.add(node.id);
+                }
+            }
+            for (const [char, childNode] of node.children.entries()) {
+                fuzzyDfs(childNode, currentWord + char);
+            }
+        }
+        fuzzyDfs(root, '');
+        return results.sort((a, b) => b.score - a.score);
+    }
+    static enhancedSearch(root, searchText, documents, documentLinks) {
+        // Get base results from trie search
+        const baseResults = this.bfsTraversal(root, searchText);
+        // Calculate document ranks
+        const documentRanks = ScoringUtils.calculateDocumentRanks(documents, documentLinks);
+        // Enhanced scoring for each result
+        return baseResults.map(result => {
+            const document = documents.get(result.id);
+            const documentRank = documentRanks.get(result.id);
+            if (!documentRank) {
+                throw new Error(`Document rank not found for id: ${result.id}`);
+            }
+            // Calculate TF-IDF score
+            const tfIdf = ScoringUtils.calculateTfIdf(searchText, document, documents);
+            // Combine scores
+            const finalScore = ScoringUtils.calculateCombinedScore(result.score, documentRank.rank, tfIdf, 1.0 // Base IDF weight
+            );
+            return {
+                id: result.id,
+                score: finalScore,
+                rank: documentRank.rank
+            };
+        }).sort((a, b) => b.score - a.score);
+    }
+}
+
+/**
+ * Creates a mock IndexedDocument for testing purposes
+ * @param id Document ID
+ * @param customContent Optional custom content
+ * @param customMetadata Optional custom metadata
+ */
+const createMockDocument = (id, customContent, customMetadata) => {
+    const defaultContent = {
+        text: `Content for ${id}`
+    };
+    const content = customContent || defaultContent;
+    const now = Date.now();
+    const metadata = {
+        indexed: now,
+        lastModified: now,
+        ...(customMetadata || {})
+    };
+    return {
+        id,
+        fields: {
+            title: `Test ${id}`,
+            content: content,
+            author: 'Test Author',
+            tags: ['test'],
+            version: '1.0'
+        },
+        metadata,
+        versions: [],
+        relations: [],
+        content, // Important: include the content property directly
+        title: `Test ${id}`,
+        author: 'Test Author',
+        tags: ['test'],
+        version: '1.0',
+        document: function () { return this; },
+        base: function () {
+            return {
+                id: this.id,
+                title: this.title,
+                author: this.author,
+                version: this.version,
+                metadata: this.metadata,
+                versions: this.versions,
+                relations: this.relations,
+                tags: this.tags
+            };
+        }
+    };
+};
+/**
+ * Creates multiple mock documents
+ * @param count Number of documents to create
+ * @param prefix ID prefix
+ */
+const createMockDocuments = (count, prefix = 'doc') => {
+    return Array.from({ length: count }, (_, i) => createMockDocument(`${prefix}${i + 1}`));
+};
+function createIndexedDocument(id, fields, metadata, versions = [], relations = []) {
+    return {
+        id,
+        fields: {
+            title: fields.title,
+            content: fields.content,
+            author: fields.author,
+            tags: fields.tags,
+            version: fields.version
+        },
+        content: fields.content,
+        metadata: metadata || {
+            indexed: Date.now(),
+            lastModified: Date.now()
+        },
+        versions,
+        relations,
+        title: fields.title,
+        author: fields.author,
+        tags: fields.tags,
+        version: fields.version,
+        document: function () { return this; },
+        base: function () {
+            return {
+                id: this.id,
+                title: this.title,
+                author: this.author,
+                tags: this.tags,
+                version: this.version,
+                metadata: this.metadata,
+                versions: this.versions,
+                relations: this.relations
+            };
+        }
+    };
+}
+function createTestDocument(id, title, contentText) {
+    return createIndexedDocument(id, {
+        title,
+        content: { text: contentText },
+        author: "Test Author",
+        tags: ["test"],
+        version: "1.0"
+    }, {
+        lastModified: Date.now(),
+        indexed: Date.now()
+    });
 }
 
 class IndexManager {
@@ -2966,6 +4252,209 @@ class IndexManager {
     // Helper method for tests to check if a document exists
     hasDocument(id) {
         return this.documents.has(id);
+    }
+}
+
+class BaseDocument {
+    constructor(doc) {
+        var _a, _b, _c, _d, _e;
+        this.id = doc.id || this.generateId();
+        this.title = ((_a = doc.fields) === null || _a === void 0 ? void 0 : _a.title) || doc.title || '';
+        this.author = ((_b = doc.fields) === null || _b === void 0 ? void 0 : _b.author) || doc.author || '';
+        this.tags = Array.isArray((_c = doc.fields) === null || _c === void 0 ? void 0 : _c.tags) ? [...doc.fields.tags] :
+            (Array.isArray(doc.tags) ? [...doc.tags] : []);
+        this.version = ((_d = doc.fields) === null || _d === void 0 ? void 0 : _d.version) || doc.version || '1.0';
+        this.fields = this.normalizeFields(doc.fields);
+        this.metadata = this.normalizeMetadata(doc.metadata || {});
+        this.versions = doc.versions || [];
+        this.relations = this.normalizeRelations(doc.relations || []);
+        this.content = doc.content ? { ...doc.content } : this.normalizeContent((_e = doc.fields) === null || _e === void 0 ? void 0 : _e.content);
+        this.links = this.normalizeLinks(doc.links);
+        this.ranks = this.normalizeRanks(doc.ranks);
+    }
+    base() {
+        return {
+            id: this.id,
+            title: this.title,
+            author: this.author,
+            version: this.version,
+            metadata: this.metadata,
+            versions: this.versions,
+            relations: this.relations,
+            tags: this.tags
+        };
+    }
+    generateId() {
+        return `doc-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+    normalizeFields(fields) {
+        return {
+            title: this.title,
+            content: this.normalizeContent(fields === null || fields === void 0 ? void 0 : fields.content),
+            author: this.author,
+            tags: this.tags,
+            version: this.version,
+            modified: (fields === null || fields === void 0 ? void 0 : fields.modified) || new Date().toISOString(),
+            ...fields
+        };
+    }
+    normalizeMetadata(metadata) {
+        var _a, _b;
+        const now = Date.now();
+        return {
+            indexed: (_a = metadata === null || metadata === void 0 ? void 0 : metadata.indexed) !== null && _a !== void 0 ? _a : now,
+            lastModified: (_b = metadata === null || metadata === void 0 ? void 0 : metadata.lastModified) !== null && _b !== void 0 ? _b : now,
+            ...metadata
+        };
+    }
+    normalizeContent(content) {
+        if (!content) {
+            return { text: '' };
+        }
+        if (typeof content === 'string') {
+            return { text: content };
+        }
+        if (typeof content === 'object' && content !== null) {
+            return this.normalizeContentObject(content);
+        }
+        return { text: String(content) };
+    }
+    normalizeContentObject(obj) {
+        const result = {};
+        for (const [key, value] of Object.entries(obj)) {
+            if (value === null || value === undefined) {
+                result[key] = null;
+                continue;
+            }
+            if (typeof value === 'object') {
+                if (Array.isArray(value)) {
+                    result[key] = this.normalizePrimitiveArray(value);
+                }
+                else {
+                    result[key] = this.normalizeContentObject(value);
+                }
+            }
+            else {
+                result[key] = this.normalizePrimitive(value);
+            }
+        }
+        return result;
+    }
+    normalizePrimitiveArray(arr) {
+        return arr.map(v => this.normalizePrimitive(v));
+    }
+    normalizePrimitive(value) {
+        if (value === null)
+            return null;
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+            return value;
+        }
+        return String(value);
+    }
+    normalizeRelations(relations) {
+        return relations.map(relation => ({
+            sourceId: this.id,
+            targetId: relation.targetId || '',
+            type: this.normalizeRelationType(relation.type || 'reference'),
+            metadata: relation.metadata
+        }));
+    }
+    normalizeLinks(links) {
+        if (!links)
+            return undefined;
+        return links.map(link => ({
+            fromId: link.fromId || this.id,
+            toId: link.toId,
+            weight: link.weight || 1,
+            url: link.url || '',
+            source: link.source || '',
+            target: link.target || '',
+            type: link.type || 'default'
+        }));
+    }
+    normalizeRanks(ranks) {
+        if (!ranks)
+            return undefined;
+        return ranks.map(rank => ({
+            id: rank.id || this.id,
+            rank: rank.rank || 0,
+            incomingLinks: rank.incomingLinks || 0,
+            outgoingLinks: rank.outgoingLinks || 0,
+            content: rank.content || {},
+            metadata: rank.metadata
+        }));
+    }
+    normalizeRelationType(type) {
+        const normalizedType = type.toLowerCase();
+        switch (normalizedType) {
+            case 'parent':
+                return 'parent';
+            case 'child':
+                return 'child';
+            case 'related':
+                return 'related';
+            default:
+                return 'reference';
+        }
+    }
+    document() {
+        return this;
+    }
+    clone() {
+        return new BaseDocument(this.toObject());
+    }
+    toObject() {
+        var _a, _b;
+        return {
+            id: this.id,
+            title: this.title,
+            author: this.author,
+            tags: [...this.tags],
+            version: this.version,
+            fields: { ...this.fields },
+            metadata: { ...this.metadata, lastModified: (_b = (_a = this.metadata) === null || _a === void 0 ? void 0 : _a.lastModified) !== null && _b !== void 0 ? _b : Date.now() },
+            versions: [...this.versions],
+            relations: [...this.relations],
+            links: this.links ? [...this.links] : undefined,
+            ranks: this.ranks ? [...this.ranks] : undefined,
+            document: () => this,
+            base: () => this.base(),
+            content: { ...this.content }
+        };
+    }
+    update(updates) {
+        var _a;
+        const now = Date.now();
+        const updatedFields = updates.fields || {};
+        if (updatedFields.content && !this.isContentEqual(updatedFields.content, this.fields.content)) {
+            this.versions.push({
+                version: Number(this.version),
+                content: this.fields.content,
+                modified: new Date(((_a = this.metadata) === null || _a === void 0 ? void 0 : _a.lastModified) || now),
+                author: this.author
+            });
+        }
+        return new BaseDocument({
+            id: this.id,
+            fields: {
+                ...this.fields,
+                ...updatedFields,
+                version: updatedFields.content ? String(Number(this.version) + 1) : this.version,
+                modified: new Date().toISOString()
+            },
+            versions: this.versions,
+            relations: updates.relations || this.relations,
+            metadata: {
+                ...this.metadata,
+                lastModified: now
+            },
+            content: updates.content !== undefined ? updates.content : this.content,
+            links: updates.links,
+            ranks: updates.ranks
+        });
+    }
+    isContentEqual(content1, content2) {
+        return JSON.stringify(content1) === JSON.stringify(content2);
     }
 }
 
@@ -4470,7 +5959,7 @@ class InMemoryAdapter extends BaseStorageAdapter {
 }
 
 // src/core/storage/IndexedDBAdapter.ts
-class IndexedDBAdapter {
+let IndexedDBAdapter$1 = class IndexedDBAdapter {
     constructor(dbName = 'nexus-search-db', dbVersion = 1) {
         this.db = null;
         this.initPromise = null;
@@ -4609,7 +6098,7 @@ class IndexedDBAdapter {
             throw new Error('IndexedDB connection not available');
         }
     }
-}
+};
 
 /**
  * PersistenceManager provides a unified interface for data persistence
@@ -4654,7 +6143,7 @@ class PersistenceManager {
     createAdapter(type) {
         switch (type) {
             case 'indexeddb':
-                return new IndexedDBAdapter();
+                return new IndexedDBAdapter$1();
             case 'memory':
             default:
                 return new InMemoryAdapter();
@@ -4899,7 +6388,7 @@ const ServiceIdentifiers = {
 function registerCoreServices(container, config = {}) {
     // Register storage adapter based on config
     if (config.storage === 'indexeddb') {
-        container.register(ServiceIdentifiers.STORAGE_ADAPTER, IndexedDBAdapter, true);
+        container.register(ServiceIdentifiers.STORAGE_ADAPTER, IndexedDBAdapter$1, true);
     }
     else {
         container.register(ServiceIdentifiers.STORAGE_ADAPTER, InMemoryAdapter, true);
@@ -5194,5 +6683,2288 @@ if (require.main === module) {
     })().catch(console.error);
 }
 
-export { SearchCLI, SearchCLI as SearchCLIDefault };
+var Command = /*#__PURE__*/Object.freeze({
+    __proto__: null
+});
+
+var IndexCommand = /*#__PURE__*/Object.freeze({
+    __proto__: null
+});
+
+var SearchCommand = /*#__PURE__*/Object.freeze({
+    __proto__: null
+});
+
+var ImportCommand = /*#__PURE__*/Object.freeze({
+    __proto__: null
+});
+
+var ExportCommand = /*#__PURE__*/Object.freeze({
+    __proto__: null
+});
+
+class SearchError extends Error {
+    constructor(message) {
+        super(message);
+    }
+}
+class IndexError extends Error {
+    constructor(message) {
+        super(message);
+    }
+}
+class ValidationError extends Error {
+    constructor(message) {
+        super(message);
+    }
+}
+class StorageError extends Error {
+    constructor(message) {
+        super(message);
+    }
+}
+class CacheError extends Error {
+    constructor(message) {
+        super(message);
+    }
+}
+class MapperError extends Error {
+    constructor(message) {
+        super(message);
+    }
+}
+class PerformanceError extends Error {
+    constructor(message) {
+        super(message);
+    }
+}
+class ConfigError extends Error {
+    constructor(message) {
+        super(message);
+    }
+}
+class SearchEventError extends Error {
+    constructor(message, type, details) {
+        super(message);
+        this.type = type;
+        this.details = details;
+    }
+}
+
+var CacheStrategyType;
+(function (CacheStrategyType) {
+    CacheStrategyType["LRU"] = "LRU";
+    CacheStrategyType["MRU"] = "MRU";
+})(CacheStrategyType || (CacheStrategyType = {}));
+
+/**
+ * Implements a link/relationship between two documents
+ */
+class DocumentLink {
+    /**
+     * Create a new document link
+     * @param source The source document ID
+     * @param target The target document ID
+     * @param type The type of relationship
+     * @param weight Optional weight of the relationship (default: 1.0)
+     * @param url Optional URL reference
+     */
+    constructor(source, target, type, weight = 1.0, url = '') {
+        if (!source || !target) {
+            throw new Error('Source and target IDs are required');
+        }
+        this.source = source;
+        this.target = target;
+        this.type = type;
+        this.weight = weight;
+        this.url = url;
+    }
+    /**
+     * Get the source document ID
+     */
+    fromId(fromId) {
+        if (fromId === this.source) {
+            return this.target;
+        }
+        if (fromId === this.target && this.isBidirectional()) {
+            return this.source;
+        }
+        throw new Error(`Invalid fromId: ${fromId}`);
+    }
+    /**
+     * Get the target document ID
+     */
+    toId(toId) {
+        if (toId === this.target) {
+            return this.source;
+        }
+        if (toId === this.source && this.isBidirectional()) {
+            return this.target;
+        }
+        throw new Error(`Invalid toId: ${toId}`);
+    }
+    /**
+     * Check if link is bidirectional based on type
+     */
+    isBidirectional() {
+        return ['reference', 'related'].includes(this.type.toLowerCase());
+    }
+    /**
+     * Update the weight of the link
+     */
+    setWeight(weight) {
+        if (weight < 0) {
+            throw new Error('Weight must be non-negative');
+        }
+        this.weight = weight;
+    }
+    /**
+     * Update the URL reference
+     */
+    setUrl(url) {
+        this.url = url;
+    }
+    /**
+     * Check if this link connects two specific documents
+     */
+    connects(docId1, docId2) {
+        return ((this.source === docId1 && this.target === docId2) ||
+            (this.isBidirectional() && this.source === docId2 && this.target === docId1));
+    }
+    /**
+     * Check if this link involves a specific document
+     */
+    involves(docId) {
+        return this.source === docId || this.target === docId;
+    }
+    /**
+     * Get the other document ID in the relationship given one ID
+     */
+    getOtherId(docId) {
+        if (this.source === docId) {
+            return this.target;
+        }
+        if (this.target === docId && this.isBidirectional()) {
+            return this.source;
+        }
+        throw new Error(`Document ${docId} is not part of this link`);
+    }
+    /**
+     * Create a reversed version of this link
+     */
+    reverse() {
+        if (!this.isBidirectional()) {
+            throw new Error('Cannot reverse a directional link');
+        }
+        return new DocumentLink(this.target, this.source, this.type, this.weight, this.url);
+    }
+    /**
+     * Clone this link
+     */
+    clone() {
+        return new DocumentLink(this.source, this.target, this.type, this.weight, this.url);
+    }
+    /**
+     * Convert to a human-readable string
+     */
+    toString() {
+        return `${this.source} -[${this.type}/${this.weight}]-> ${this.target}`;
+    }
+    /**
+     * Convert to a JSON object
+     */
+    toJSON() {
+        return {
+            source: this.source,
+            target: this.target,
+            type: this.type,
+            weight: this.weight,
+            url: this.url
+        };
+    }
+}
+
+class MimeTypeDetector {
+    constructor(customTypes) {
+        this.customMimeTypes = new Map(Object.entries(customTypes || {}));
+    }
+    /**
+     * Static detection by file extension
+     */
+    static detectFromExtension(filename) {
+        const extension = filename.toLowerCase().split('.').pop() || '';
+        const mimeTypes = {
+            'html': 'text/html',
+            'htm': 'text/html',
+            'css': 'text/css',
+            'js': 'text/javascript',
+            'json': 'application/json',
+            'png': 'image/png',
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'gif': 'image/gif',
+            'svg': 'image/svg+xml',
+            'xml': 'application/xml',
+            'txt': 'text/plain',
+            'md': 'text/markdown',
+            'pdf': 'application/pdf',
+            'zip': 'application/zip',
+            'doc': 'application/msword',
+            'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'xls': 'application/vnd.ms-excel',
+            'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'csv': 'text/csv'
+        };
+        return mimeTypes[extension] || this.DEFAULT_TYPE;
+    }
+    /**
+     * Detect from file content (magic numbers)
+     */
+    static detectFromBuffer(buffer) {
+        if (buffer.length < 4) {
+            return this.DEFAULT_TYPE;
+        }
+        // Check for magic numbers
+        if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
+            return 'image/jpeg';
+        }
+        if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+            return 'image/png';
+        }
+        if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
+            return 'image/gif';
+        }
+        if (buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46) {
+            return 'application/pdf';
+        }
+        // Check for text-based formats
+        const potentialText = buffer.slice(0, 100).toString('utf8');
+        if (potentialText.startsWith('<!DOCTYPE html>') || potentialText.startsWith('<html')) {
+            return 'text/html';
+        }
+        if (potentialText.startsWith('{') && potentialText.includes(':')) {
+            return 'application/json';
+        }
+        if (potentialText.startsWith('<?xml')) {
+            return 'application/xml';
+        }
+        if (/^[\x20-\x7E\r\n\t]*$/.test(potentialText)) {
+            return 'text/plain';
+        }
+        return this.DEFAULT_TYPE;
+    }
+    /**
+     * Instance method with custom type support
+     */
+    detectType(filename, buffer) {
+        // Check custom types first
+        const extension = filename.toLowerCase().split('.').pop() || '';
+        if (this.customMimeTypes.has(extension)) {
+            return this.customMimeTypes.get(extension) || MimeTypeDetector.DEFAULT_TYPE;
+        }
+        // Try content-based detection if buffer is provided
+        if (buffer) {
+            return MimeTypeDetector.detectFromBuffer(buffer);
+        }
+        // Fall back to extension-based detection
+        return MimeTypeDetector.detectFromExtension(filename);
+    }
+    /**
+     * Add custom mime type
+     */
+    addCustomType(extension, mimeType) {
+        this.customMimeTypes.set(extension.toLowerCase(), mimeType);
+    }
+}
+MimeTypeDetector.DEFAULT_TYPE = 'application/octet-stream';
+
+class DocumentProcessor {
+    constructor() {
+        this.performanceMonitor = new PerformanceMonitor();
+        this.mimeDetector = new MimeTypeDetector();
+        this.validator = ValidationUtils;
+    }
+    /**
+     * Generate a unique document ID
+     * @param filePath Path to the document
+     */
+    generateDocumentId(filePath) {
+        const timestamp = Date.now();
+        const randomStr = Math.random().toString(36).substring(2, 10);
+        return `doc-${timestamp}-${randomStr}`;
+    }
+    /**
+     * Extract basic metadata from file path and content
+     */
+    async extractBasicMetadata(filePath, content) {
+        const buffer = typeof content === 'string' ? Buffer.from(content) : content;
+        const mimeType = this.mimeDetector.detectType(filePath, buffer);
+        return {
+            fileType: mimeType,
+            fileSize: buffer.length,
+            lastModified: Date.now(),
+            indexed: Date.now(),
+        };
+    }
+}
+
+class PathUtils {
+    constructor(rootDir = '') {
+        this.rootDir = rootDir;
+    }
+    /**
+     * Static method to join path segments
+     */
+    static join(...paths) {
+        // Remove empty segments
+        const segments = paths.filter(Boolean);
+        if (segments.length === 0) {
+            return '';
+        }
+        // Handle Windows vs Unix paths
+        const isAbsolute = segments[0].startsWith('/') || /^[A-Z]:[\\\/]/.test(segments[0]);
+        // Normalize separators and join
+        const normalized = segments.map(segment => segment.replace(/[\\\/]+/g, '/')
+            .replace(/^\//, '')
+            .replace(/\/$/, '')).filter(Boolean);
+        return (isAbsolute ? '/' : '') + normalized.join('/');
+    }
+    /**
+     * Get file extension
+     */
+    static getExtension(path) {
+        const filename = path.split(/[\\\/]/).pop() || '';
+        return filename.includes('.') ? filename.split('.').pop() || '' : '';
+    }
+    /**
+     * Get filename without extension
+     */
+    static getBasename(path, includeExtension = true) {
+        const filename = path.split(/[\\\/]/).pop() || '';
+        if (includeExtension) {
+            return filename;
+        }
+        const lastDotIndex = filename.lastIndexOf('.');
+        return lastDotIndex !== -1 ? filename.substring(0, lastDotIndex) : filename;
+    }
+    /**
+     * Get directory name
+     */
+    static getDirname(path) {
+        const lastSeparatorIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+        return lastSeparatorIndex !== -1 ? path.substring(0, lastSeparatorIndex) : '';
+    }
+    /**
+     * Normalize path separators
+     */
+    static normalizePath(path) {
+        return path.replace(/[\\\/]+/g, '/');
+    }
+    /**
+     * Check if path is absolute
+     */
+    static isAbsolute(path) {
+        return path.startsWith('/') || /^[A-Z]:[\\\/]/.test(path);
+    }
+    /**
+     * Get relative path
+     */
+    static relative(from, to) {
+        const fromParts = this.normalizePath(from).split('/').filter(Boolean);
+        const toParts = this.normalizePath(to).split('/').filter(Boolean);
+        let commonParts = 0;
+        while (commonParts < fromParts.length &&
+            commonParts < toParts.length &&
+            fromParts[commonParts] === toParts[commonParts]) {
+            commonParts++;
+        }
+        const upCount = fromParts.length - commonParts;
+        const upPath = Array(upCount).fill('..').join('/');
+        const downPath = toParts.slice(commonParts).join('/');
+        if (!upPath && !downPath) {
+            return '.';
+        }
+        if (!upPath) {
+            return downPath;
+        }
+        if (!downPath) {
+            return upPath;
+        }
+        return upPath + '/' + downPath;
+    }
+    /**
+     * Instance method to resolve path relative to root directory
+     */
+    resolve(...paths) {
+        if (paths.length === 0) {
+            return this.rootDir;
+        }
+        // If first path is absolute, ignore rootDir
+        if (PathUtils.isAbsolute(paths[0])) {
+            return PathUtils.join(...paths);
+        }
+        return PathUtils.join(this.rootDir, ...paths);
+    }
+}
+
+class PlainTextProcessor extends DocumentProcessor {
+    constructor() {
+        super(...arguments);
+        this.supportedExtensions = ['txt', 'text', 'log', 'csv', 'tsv'];
+    }
+    async process(filePath, content, metadata) {
+        return await this.performanceMonitor.measure('plainTextProcess', async () => {
+            const docContent = await this.extractContent(content);
+            const docMetadata = {
+                ...(await this.extractBasicMetadata(filePath, content)),
+                ...metadata
+            };
+            const filename = PathUtils.getBasename(filePath, false);
+            const indexedDocument = {
+                id: this.generateDocumentId(filePath),
+                fields: {
+                    title: filename,
+                    content: docContent,
+                    path: filePath,
+                    author: '',
+                    tags: [],
+                    version: '1.0'
+                },
+                metadata: docMetadata,
+                versions: [],
+                relations: [],
+                document() { return indexedDocument; },
+                base: function () {
+                    return {
+                        id: this.id,
+                        title: filename,
+                        author: '',
+                        tags: [],
+                        version: '1.0',
+                        metadata: docMetadata,
+                        versions: [],
+                        relations: []
+                    };
+                },
+                title: filename,
+                author: '',
+                tags: [],
+                version: '1.0',
+                content: docContent
+            };
+            return indexedDocument;
+        });
+    }
+    async extractContent(content) {
+        return this.performanceMonitor.measure('plainTextExtraction', async () => {
+            const textContent = typeof content === 'string'
+                ? content
+                : content.toString('utf8');
+            return {
+                text: textContent,
+                lines: textContent.split('\n').length,
+                words: textContent.split(/\s+/).filter(Boolean).length
+            };
+        });
+    }
+    canProcess(filePath, mimeType) {
+        const extension = PathUtils.getExtension(filePath).toLowerCase();
+        if (this.supportedExtensions.includes(extension)) {
+            return true;
+        }
+        if (mimeType) {
+            return mimeType === 'text/plain';
+        }
+        return false;
+    }
+}
+
+class HTMLProcessor extends DocumentProcessor {
+    constructor() {
+        super(...arguments);
+        this.supportedExtensions = ['html', 'htm', 'xhtml'];
+    }
+    async process(filePath, content, metadata) {
+        return await this.performanceMonitor.measure('htmlProcess', async () => {
+            const docContent = await this.extractContent(content);
+            const docMetadata = {
+                ...(await this.extractBasicMetadata(filePath, content)),
+                ...metadata,
+                contentType: 'text/html'
+            };
+            const metaTags = this.extractMetaTags(content.toString());
+            const title = metaTags.title || PathUtils.getBasename(filePath, false);
+            const keywords = metaTags.keywords ? metaTags.keywords.split(',').map(k => k.trim()) : [];
+            const indexedDocument = {
+                id: this.generateDocumentId(filePath),
+                fields: {
+                    title: title,
+                    content: docContent,
+                    path: filePath,
+                    author: metaTags.author || '',
+                    tags: keywords,
+                    version: '1.0',
+                    description: metaTags.description || ''
+                },
+                metadata: {
+                    ...docMetadata,
+                    charset: metaTags.charset || 'utf-8',
+                    language: metaTags.lang || 'en'
+                },
+                versions: [],
+                relations: [],
+                document() { return indexedDocument; },
+                base: function () {
+                    return {
+                        id: this.id,
+                        title: title,
+                        author: metaTags.author || '',
+                        tags: keywords,
+                        version: '1.0',
+                        metadata: docMetadata,
+                        versions: [],
+                        relations: []
+                    };
+                },
+                title: title,
+                author: metaTags.author || '',
+                tags: keywords,
+                version: '1.0',
+                content: docContent
+            };
+            return indexedDocument;
+        });
+    }
+    async extractContent(content) {
+        return this.performanceMonitor.measure('htmlExtraction', async () => {
+            const htmlContent = typeof content === 'string' ? content : content.toString('utf8');
+            // Create a DOM parser to extract text and structure (browser environment)
+            if (typeof DOMParser !== 'undefined') {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(htmlContent, 'text/html');
+                // Remove scripts and styles
+                const scripts = doc.getElementsByTagName('script');
+                const styles = doc.getElementsByTagName('style');
+                const removableElements = [...Array.from(scripts), ...Array.from(styles)];
+                removableElements.forEach((el) => el.remove());
+                // Extract headings
+                const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'))
+                    .map(h => {
+                    var _a;
+                    return ({
+                        level: parseInt(h.tagName.substring(1)),
+                        text: ((_a = h.textContent) === null || _a === void 0 ? void 0 : _a.trim()) || ''
+                    });
+                });
+                // Extract links
+                const links = Array.from(doc.getElementsByTagName('a'))
+                    .map(a => {
+                    var _a;
+                    return ({
+                        text: ((_a = a.textContent) === null || _a === void 0 ? void 0 : _a.trim()) || '',
+                        href: a.getAttribute('href') || '',
+                        title: a.getAttribute('title') || ''
+                    });
+                });
+                // Extract main text content
+                let mainText = doc.body.textContent || '';
+                mainText = mainText.replace(/\s+/g, ' ').trim();
+                return {
+                    text: mainText,
+                    structure: {
+                        headings,
+                        links,
+                        images: Array.from(doc.getElementsByTagName('img')).length,
+                        tables: Array.from(doc.getElementsByTagName('table')).length
+                    },
+                    html: htmlContent // Store original HTML for reference
+                };
+            }
+            // Node.js environment fallback
+            else {
+                // Simple regex-based extraction
+                // Remove HTML tags, scripts, and styles
+                const cleanedText = htmlContent
+                    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+                    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+                    .replace(/<[^>]+>/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                // Extract title
+                const titleMatch = htmlContent.match(/<title[^>]*>(.*?)<\/title>/i);
+                const title = titleMatch ? titleMatch[1].trim() : '';
+                return {
+                    text: cleanedText,
+                    title: title,
+                    html: htmlContent
+                };
+            }
+        });
+    }
+    canProcess(filePath, mimeType) {
+        const extension = PathUtils.getExtension(filePath).toLowerCase();
+        if (this.supportedExtensions.includes(extension)) {
+            return true;
+        }
+        if (mimeType) {
+            return ['text/html', 'application/xhtml+xml'].includes(mimeType);
+        }
+        return false;
+    }
+    extractMetaTags(htmlContent) {
+        const metaTags = {};
+        // Extract title
+        const titleMatch = htmlContent.match(/<title[^>]*>(.*?)<\/title>/i);
+        if (titleMatch) {
+            metaTags.title = titleMatch[1].trim();
+        }
+        // Extract meta tags
+        const metaRegex = /<meta\s+([^>]*)>/gi;
+        let metaMatch;
+        while ((metaMatch = metaRegex.exec(htmlContent)) !== null) {
+            const metaContent = metaMatch[1];
+            // Get name/property and content
+            const nameMatch = metaContent.match(/name\s*=\s*["']([^"']*)["']/i);
+            const propertyMatch = metaContent.match(/property\s*=\s*["']([^"']*)["']/i);
+            const contentMatch = metaContent.match(/content\s*=\s*["']([^"']*)["']/i);
+            const charsetMatch = metaContent.match(/charset\s*=\s*["']([^"']*)["']/i);
+            const name = nameMatch ? nameMatch[1].toLowerCase() :
+                propertyMatch ? propertyMatch[1].toLowerCase() : '';
+            const content = contentMatch ? contentMatch[1] : '';
+            if (name && content) {
+                metaTags[name] = content;
+            }
+            if (charsetMatch) {
+                metaTags.charset = charsetMatch[1];
+            }
+        }
+        // Extract language
+        const htmlLangMatch = htmlContent.match(/<html[^>]*lang\s*=\s*["']([^"']*)["'][^>]*>/i);
+        if (htmlLangMatch) {
+            metaTags.lang = htmlLangMatch[1];
+        }
+        return metaTags;
+    }
+}
+
+class MarkdownProcessor extends DocumentProcessor {
+    constructor() {
+        super(...arguments);
+        this.supportedExtensions = ['md', 'markdown', 'mdown', 'mkd'];
+    }
+    async process(filePath, content, metadata) {
+        return await this.performanceMonitor.measure('markdownProcess', async () => {
+            const docContent = await this.extractContent(content);
+            const docMetadata = {
+                ...(await this.extractBasicMetadata(filePath, content)),
+                ...metadata,
+                contentType: 'text/markdown'
+            };
+            // Extract frontmatter data
+            const { frontmatter, markdownContent } = this.extractFrontmatter(typeof content === 'string' ? content : content.toString('utf8'));
+            const title = frontmatter.title || PathUtils.getBasename(filePath, false);
+            const tags = Array.isArray(frontmatter.tags)
+                ? frontmatter.tags
+                : (typeof frontmatter.tags === 'string'
+                    ? frontmatter.tags.split(',').map(t => t.trim())
+                    : []);
+            const indexedDocument = {
+                id: this.generateDocumentId(filePath),
+                fields: {
+                    title: title,
+                    content: docContent,
+                    path: filePath,
+                    author: frontmatter.author || '',
+                    tags: tags,
+                    version: frontmatter.version || '1.0',
+                    description: frontmatter.description || '',
+                    date: frontmatter.date || '',
+                    category: frontmatter.category || '',
+                    ...frontmatter // Include all frontmatter fields
+                },
+                metadata: {
+                    ...docMetadata,
+                    markdownType: frontmatter.type || 'standard',
+                    language: frontmatter.language || 'en'
+                },
+                versions: [],
+                relations: [],
+                document() { return indexedDocument; },
+                base: function () {
+                    return {
+                        id: this.id,
+                        title: title,
+                        author: frontmatter.author || '',
+                        tags: tags,
+                        version: frontmatter.version || '1.0',
+                        metadata: docMetadata,
+                        versions: [],
+                        relations: []
+                    };
+                },
+                title: title,
+                author: frontmatter.author || '',
+                tags: tags,
+                version: frontmatter.version || '1.0',
+                content: docContent
+            };
+            return indexedDocument;
+        });
+    }
+    async extractContent(content) {
+        return this.performanceMonitor.measure('markdownExtraction', async () => {
+            const markdownText = typeof content === 'string' ? content : content.toString('utf8');
+            // Extract frontmatter and main content
+            const { frontmatter, markdownContent } = this.extractFrontmatter(markdownText);
+            // Extract headings using regex
+            const headings = [];
+            const headingRegex = /^(#{1,6})\s+(.+)$/gm;
+            let match;
+            while ((match = headingRegex.exec(markdownContent)) !== null) {
+                headings.push({
+                    level: match[1].length,
+                    text: match[2].trim(),
+                    position: match.index
+                });
+            }
+            // Extract code blocks
+            const codeBlocks = [];
+            const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
+            while ((match = codeBlockRegex.exec(markdownContent)) !== null) {
+                codeBlocks.push({
+                    language: match[1] || 'text',
+                    code: match[2].trim()
+                });
+            }
+            // Extract links
+            const links = [];
+            const linkRegex = /\[([^\]]+)\]\(([^)]+)(?:\s+"([^"]+)")?\)/g;
+            while ((match = linkRegex.exec(markdownContent)) !== null) {
+                links.push({
+                    text: match[1],
+                    url: match[2],
+                    title: match[3]
+                });
+            }
+            // Convert markdown to plain text for search indexing
+            // Remove code blocks, headers symbols, links (keeping link text)
+            const plainText = markdownContent
+                .replace(/```[\s\S]*?```/g, '') // Remove code blocks
+                .replace(/#+\s+/g, '') // Remove heading markers
+                .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Convert links to just their text
+                .replace(/\*\*([^*]+)\*\*/g, '$1') // Remove bold markers
+                .replace(/\*([^*]+)\*/g, '$1') // Remove italic markers
+                .replace(/~~([^~]+)~~/g, '$1') // Remove strikethrough
+                .replace(/`([^`]+)`/g, '$1') // Remove inline code
+                .replace(/\n/g, ' ') // Replace newlines with spaces
+                .replace(/\s+/g, ' ') // Normalize whitespace
+                .trim();
+            return {
+                text: plainText,
+                structure: {
+                    headings,
+                    links,
+                    codeBlocks
+                },
+                frontmatter,
+                markdown: markdownContent // Store original markdown content
+            };
+        });
+    }
+    canProcess(filePath, mimeType) {
+        const extension = PathUtils.getExtension(filePath).toLowerCase();
+        if (this.supportedExtensions.includes(extension)) {
+            return true;
+        }
+        if (mimeType) {
+            return ['text/markdown', 'text/x-markdown'].includes(mimeType);
+        }
+        return false;
+    }
+    extractFrontmatter(markdownText) {
+        const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/;
+        const match = markdownText.match(frontmatterRegex);
+        if (!match) {
+            return {
+                frontmatter: {},
+                markdownContent: markdownText
+            };
+        }
+        const frontmatterStr = match[1];
+        const content = match[2];
+        // Parse YAML-style frontmatter
+        const frontmatter = {};
+        const lines = frontmatterStr.split('\n');
+        for (const line of lines) {
+            const keyValueMatch = line.match(/^\s*([^:]+):\s*(.*)$/);
+            if (keyValueMatch) {
+                const [, key, value] = keyValueMatch;
+                // Handle array values (comma-separated)
+                if (value.includes(',') && (key === 'tags' || key === 'categories')) {
+                    frontmatter[key.trim()] = value.split(',').map(v => v.trim());
+                }
+                else {
+                    frontmatter[key.trim()] = value.trim();
+                }
+            }
+        }
+        return {
+            frontmatter,
+            markdownContent: content
+        };
+    }
+}
+
+class BinaryProcessor extends DocumentProcessor {
+    constructor() {
+        super(...arguments);
+        this.maxTextExtraction = 10 * 1024; // 10KB max for text extraction
+    }
+    async process(filePath, content, metadata) {
+        return await this.performanceMonitor.measure('binaryProcess', async () => {
+            const buffer = typeof content === 'string' ? Buffer.from(content) : content;
+            const docContent = await this.extractContent(buffer);
+            // Enhanced metadata extraction for binary files
+            const enhancedMetadata = await this.extractEnhancedMetadata(filePath, buffer);
+            const docMetadata = {
+                ...enhancedMetadata,
+                ...metadata
+            };
+            const filename = PathUtils.getBasename(filePath, true);
+            const extension = PathUtils.getExtension(filePath).toLowerCase();
+            const indexedDocument = {
+                id: this.generateDocumentId(filePath),
+                fields: {
+                    title: filename,
+                    content: docContent,
+                    path: filePath,
+                    author: '',
+                    tags: [extension], // Use file extension as a tag
+                    version: '1.0',
+                    extension: extension
+                },
+                metadata: docMetadata,
+                versions: [],
+                relations: [],
+                document() { return indexedDocument; },
+                base: function () {
+                    return {
+                        id: this.id,
+                        title: filename,
+                        author: '',
+                        tags: [extension],
+                        version: '1.0',
+                        metadata: docMetadata,
+                        versions: [],
+                        relations: []
+                    };
+                },
+                title: filename,
+                author: '',
+                tags: [extension],
+                version: '1.0',
+                content: docContent
+            };
+            return indexedDocument;
+        });
+    }
+    async extractContent(content) {
+        return this.performanceMonitor.measure('binaryExtraction', async () => {
+            // Binary file handling primarily focuses on metadata
+            // However, we can try to extract ASCII text if present
+            const result = {
+                binaryType: 'unknown',
+                size: content.length,
+                hasPrintableText: false
+            };
+            // Check if file contains printable text
+            const sampleSize = Math.min(this.maxTextExtraction, content.length);
+            const sample = content.slice(0, sampleSize);
+            // Consider text if more than 90% is printable ASCII
+            const printableChars = sample.filter(b => b >= 32 && b <= 126).length;
+            const printableRatio = printableChars / sampleSize;
+            if (printableRatio > 0.9) {
+                result.hasPrintableText = true;
+                result.text = sample.toString('utf8');
+            }
+            // Detect common binary file types
+            if (content.length >= 4) {
+                // Check for common binary file signatures
+                if (content[0] === 0x50 && content[1] === 0x4B) {
+                    result.binaryType = 'archive/zip';
+                }
+                else if (content[0] === 0xFF && content[1] === 0xD8 && content[2] === 0xFF) {
+                    result.binaryType = 'image/jpeg';
+                }
+                else if (content[0] === 0x89 && content[1] === 0x50 && content[2] === 0x4E && content[3] === 0x47) {
+                    result.binaryType = 'image/png';
+                }
+                else if (content[0] === 0x25 && content[1] === 0x50 && content[2] === 0x44 && content[3] === 0x46) {
+                    result.binaryType = 'application/pdf';
+                }
+            }
+            // Calculate a hash of the content for reference
+            result.contentHash = this.calculateHash(content);
+            return result;
+        });
+    }
+    canProcess(filePath, mimeType) {
+        // Binary processor is a fallback for files that other processors can't handle
+        // We determine this by checking if the mime type isn't text-based
+        if (mimeType) {
+            const isTextBased = mimeType.startsWith('text/') ||
+                mimeType === 'application/json' ||
+                mimeType === 'application/xml' ||
+                mimeType === 'application/javascript';
+            return !isTextBased;
+        }
+        // If no mime type provided, check extension
+        const extension = PathUtils.getExtension(filePath).toLowerCase();
+        const textExtensions = ['txt', 'md', 'html', 'htm', 'xml', 'json', 'js', 'css', 'csv'];
+        return !textExtensions.includes(extension);
+    }
+    /**
+     * Extract enhanced metadata for binary files
+     */
+    async extractEnhancedMetadata(filePath, content) {
+        const mimeType = MimeTypeDetector.detectFromBuffer(content);
+        const now = Date.now();
+        const metadata = {
+            fileType: mimeType,
+            fileSize: content.length,
+            lastModified: now,
+            indexed: now,
+            contentHash: this.calculateHash(content),
+            extension: PathUtils.getExtension(filePath).toLowerCase()
+        };
+        // Additional metadata for specific types
+        if (mimeType.startsWith('image/')) {
+            // Extract image dimensions if possible
+            // This would require image processing libraries in a real implementation
+            metadata.documentClass = 'image';
+        }
+        else if (mimeType.startsWith('audio/')) {
+            metadata.documentClass = 'audio';
+        }
+        else if (mimeType.startsWith('video/')) {
+            metadata.documentClass = 'video';
+        }
+        else if (mimeType.startsWith('application/')) {
+            if (mimeType.includes('pdf')) {
+                metadata.documentClass = 'document';
+            }
+            else if (mimeType.includes('zip') || mimeType.includes('archive')) {
+                metadata.documentClass = 'archive';
+            }
+            else {
+                metadata.documentClass = 'application';
+            }
+        }
+        return metadata;
+    }
+    /**
+     * Calculate a simple hash for content identification
+     */
+    calculateHash(buffer) {
+        let hash = 0;
+        for (let i = 0; i < buffer.length; i++) {
+            hash = ((hash << 5) - hash) + buffer[i];
+            hash |= 0; // Convert to 32bit integer
+        }
+        // Convert to hex string
+        return hash.toString(16).padStart(8, '0');
+    }
+}
+
+class DocumentProcessorFactory {
+    constructor() {
+        this.processors = [];
+        // Register document processors in priority order
+        this.processors.push(new HTMLProcessor());
+        this.processors.push(new MarkdownProcessor());
+        this.processors.push(new PlainTextProcessor());
+        this.processors.push(new BinaryProcessor()); // Fallback processor
+    }
+    /**
+     * Get the appropriate processor for a file
+     */
+    getProcessorForFile(filePath, mimeType) {
+        for (const processor of this.processors) {
+            if (processor.canProcess(filePath, mimeType)) {
+                return processor;
+            }
+        }
+        // Default to binary processor if no other processor matches
+        return this.processors[this.processors.length - 1];
+    }
+    /**
+     * Process a document with the appropriate processor
+     */
+    async processDocument(filePath, content, metadata) {
+        const processor = this.getProcessorForFile(filePath);
+        return await processor.process(filePath, content, metadata);
+    }
+}
+
+/**
+ * File system storage adapter implementation for Node.js environments
+ */
+class FileSystemAdapter {
+    constructor(basePath) {
+        this.initialized = false;
+        this.basePath = basePath;
+        this.performanceMonitor = new PerformanceMonitor$1();
+        // Dynamic import for fs in Node.js environments
+        try {
+            // This is for environments where dynamic imports are supported
+            this.loadFsModule();
+        }
+        catch (error) {
+            console.warn('File system module not available:', error);
+        }
+    }
+    async loadFsModule() {
+        try {
+            // Try to load the fs/promises module dynamically
+            // Note: This only works in Node.js environments
+            this.fs = await import('fs/promises');
+        }
+        catch (error) {
+            throw new Error(`Failed to load file system module: ${error}`);
+        }
+    }
+    async initialize() {
+        if (this.initialized)
+            return;
+        try {
+            if (!this.fs) {
+                await this.loadFsModule();
+            }
+            // Ensure the base directory exists
+            await this.fs.mkdir(this.basePath, { recursive: true });
+            this.initialized = true;
+        }
+        catch (error) {
+            throw new Error(`Failed to initialize file system storage: ${error}`);
+        }
+    }
+    async store(key, data) {
+        return this.performanceMonitor.measure('store', async () => {
+            if (!this.fs) {
+                throw new Error('File system module not available');
+            }
+            try {
+                const filePath = this.getFilePath(key);
+                const jsonData = JSON.stringify(data, null, 2);
+                await this.fs.writeFile(filePath, jsonData, 'utf8');
+            }
+            catch (error) {
+                throw new Error(`Failed to store data to file system: ${error}`);
+            }
+        });
+    }
+    async retrieve(key) {
+        return this.performanceMonitor.measure('retrieve', async () => {
+            if (!this.fs) {
+                throw new Error('File system module not available');
+            }
+            try {
+                const filePath = this.getFilePath(key);
+                const fileExists = await this.fileExists(filePath);
+                if (!fileExists) {
+                    return null;
+                }
+                const jsonData = await this.fs.readFile(filePath, 'utf8');
+                return JSON.parse(jsonData);
+            }
+            catch (error) {
+                throw new Error(`Failed to retrieve data from file system: ${error}`);
+            }
+        });
+    }
+    async clear() {
+        return this.performanceMonitor.measure('clear', async () => {
+            if (!this.fs) {
+                throw new Error('File system module not available');
+            }
+            try {
+                // Read all files in the directory and delete them
+                const files = await this.fs.readdir(this.basePath);
+                for (const file of files) {
+                    if (file.endsWith('.json')) {
+                        await this.fs.unlink(`${this.basePath}/${file}`);
+                    }
+                }
+            }
+            catch (error) {
+                throw new Error(`Failed to clear files: ${error}`);
+            }
+        });
+    }
+    async close() {
+        // No specific close operation needed for file system
+        this.performanceMonitor.clear();
+    }
+    getFilePath(key) {
+        const sanitizedKey = key.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        return `${this.basePath}/${sanitizedKey}.json`;
+    }
+    async fileExists(filePath) {
+        try {
+            await this.fs.access(filePath);
+            return true;
+        }
+        catch (_a) {
+            return false;
+        }
+    }
+    getMetrics() {
+        return this.performanceMonitor.getMetrics();
+    }
+}
+
+/**
+ * Memory-based storage adapter implementation
+ */
+class MemoryStorageAdapter {
+    constructor() {
+        this.initialized = false;
+        this.storage = new Map();
+        this.performanceMonitor = new PerformanceMonitor$1();
+    }
+    async initialize() {
+        if (this.initialized)
+            return;
+        try {
+            this.initialized = true;
+        }
+        catch (error) {
+            throw new Error(`Failed to initialize memory storage: ${error}`);
+        }
+    }
+    async store(key, data) {
+        return this.performanceMonitor.measure('store', async () => {
+            this.storage.set(key, data);
+        });
+    }
+    async retrieve(key) {
+        return this.performanceMonitor.measure('retrieve', async () => {
+            return this.storage.get(key);
+        });
+    }
+    async clear() {
+        return this.performanceMonitor.measure('clear', async () => {
+            this.storage.clear();
+        });
+    }
+    async close() {
+        this.storage.clear();
+        this.performanceMonitor.clear();
+    }
+    getMetrics() {
+        return this.performanceMonitor.getMetrics();
+    }
+}
+/**
+ * IndexedDB storage adapter implementation
+ */
+class IndexedDBAdapter {
+    constructor(dbName, storeName = 'documents', version = 1) {
+        this.db = null;
+        this.initialized = false;
+        this.dbName = dbName;
+        this.storeName = storeName;
+        this.version = version;
+        this.performanceMonitor = new PerformanceMonitor$1();
+    }
+    async initialize() {
+        if (this.initialized && this.db)
+            return;
+        return new Promise((resolve, reject) => {
+            try {
+                const request = indexedDB.open(this.dbName, this.version);
+                request.onupgradeneeded = (event) => {
+                    const db = event.target.result;
+                    if (!db.objectStoreNames.contains(this.storeName)) {
+                        db.createObjectStore(this.storeName, { keyPath: 'id' });
+                    }
+                };
+                request.onsuccess = (event) => {
+                    this.db = event.target.result;
+                    this.initialized = true;
+                    resolve();
+                };
+                request.onerror = (event) => {
+                    reject(new Error(`Failed to open IndexedDB: ${event.target.error}`));
+                };
+            }
+            catch (error) {
+                reject(new Error(`IndexedDB initialization error: ${error}`));
+            }
+        });
+    }
+    async store(key, data) {
+        return this.performanceMonitor.measure('store', async () => {
+            if (!this.db) {
+                throw new Error('Database not initialized');
+            }
+            return new Promise((resolve, reject) => {
+                try {
+                    const transaction = this.db.transaction([this.storeName], 'readwrite');
+                    const objectStore = transaction.objectStore(this.storeName);
+                    const request = objectStore.put({
+                        id: key,
+                        data,
+                        timestamp: Date.now()
+                    });
+                    request.onsuccess = () => resolve();
+                    request.onerror = (event) => {
+                        reject(new Error(`Failed to store data: ${event.target.error}`));
+                    };
+                }
+                catch (error) {
+                    reject(new Error(`Store operation error: ${error}`));
+                }
+            });
+        });
+    }
+    async retrieve(key) {
+        return this.performanceMonitor.measure('retrieve', async () => {
+            if (!this.db) {
+                throw new Error('Database not initialized');
+            }
+            return new Promise((resolve, reject) => {
+                try {
+                    const transaction = this.db.transaction([this.storeName], 'readonly');
+                    const objectStore = transaction.objectStore(this.storeName);
+                    const request = objectStore.get(key);
+                    request.onsuccess = (event) => {
+                        const result = event.target.result;
+                        resolve(result ? result.data : null);
+                    };
+                    request.onerror = (event) => {
+                        reject(new Error(`Failed to retrieve data: ${event.target.error}`));
+                    };
+                }
+                catch (error) {
+                    reject(new Error(`Retrieve operation error: ${error}`));
+                }
+            });
+        });
+    }
+    async clear() {
+        return this.performanceMonitor.measure('clear', async () => {
+            if (!this.db) {
+                throw new Error('Database not initialized');
+            }
+            return new Promise((resolve, reject) => {
+                try {
+                    const transaction = this.db.transaction([this.storeName], 'readwrite');
+                    const objectStore = transaction.objectStore(this.storeName);
+                    const request = objectStore.clear();
+                    request.onsuccess = () => resolve();
+                    request.onerror = (event) => {
+                        reject(new Error(`Failed to clear data: ${event.target.error}`));
+                    };
+                }
+                catch (error) {
+                    reject(new Error(`Clear operation error: ${error}`));
+                }
+            });
+        });
+    }
+    async close() {
+        if (this.db) {
+            this.db.close();
+            this.db = null;
+            this.initialized = false;
+        }
+        this.performanceMonitor.clear();
+    }
+    getMetrics() {
+        return this.performanceMonitor.getMetrics();
+    }
+}
+/**
+ * Factory to create the appropriate storage adapter based on environment
+ */
+class StorageAdapterFactory {
+    static createAdapter(type, options = {}) {
+        switch (type) {
+            case 'memory':
+                return new MemoryStorageAdapter();
+            case 'indexeddb':
+                return new IndexedDBAdapter(options.dbName || 'nexus-search', options.storeName || 'documents', options.version || 1);
+            case 'filesystem':
+                return new FileSystemAdapter(options.basePath || './data');
+            default:
+                return new MemoryStorageAdapter();
+        }
+    }
+    static createManager(_type, _options = {}) {
+        return new StorageManager();
+    }
+}
+
+/**
+ * Comprehensive storage manager that can use different adapters
+ */
+let StorageManager$1 = class StorageManager {
+    constructor(adapter, optimizationEnabled = true) {
+        this.adapter = adapter;
+        this.optimizationEnabled = optimizationEnabled;
+        this.cache = new Map();
+        this.performanceMonitor = new PerformanceMonitor$1();
+    }
+    async initialize() {
+        return this.performanceMonitor.measure('initialize', async () => {
+            await this.adapter.initialize();
+        });
+    }
+    async storeDocument(document) {
+        return this.performanceMonitor.measure('storeDocument', async () => {
+            // Validate document before storing
+            const isValid = validateDocument({
+                id: document.id,
+                content: document.content,
+                version: document.version,
+                metadata: document.metadata
+            }, ['id', 'content']);
+            if (!isValid) {
+                throw new Error(`Invalid document structure: ${document.id}`);
+            }
+            await this.adapter.store(document.id, document);
+            this.cache.set(document.id, document);
+        });
+    }
+    async retrieveDocument(id) {
+        return this.performanceMonitor.measure('retrieveDocument', async () => {
+            // Check cache first
+            if (this.cache.has(id)) {
+                return this.cache.get(id);
+            }
+            const document = await this.adapter.retrieve(id);
+            if (document) {
+                this.cache.set(id, document);
+            }
+            return document || null;
+        });
+    }
+    async storeIndex(indexName, data) {
+        return this.performanceMonitor.measure('storeIndex', async () => {
+            if (this.optimizationEnabled && Array.isArray(data)) {
+                // Optimize the index before storing
+                const optimized = optimizeIndex(data);
+                await this.adapter.store(`index-${indexName}`, optimized.data);
+            }
+            else {
+                await this.adapter.store(`index-${indexName}`, data);
+            }
+        });
+    }
+    async retrieveIndex(indexName) {
+        return this.performanceMonitor.measure('retrieveIndex', async () => {
+            return (await this.adapter.retrieve(`index-${indexName}`));
+        });
+    }
+    async clearAll() {
+        return this.performanceMonitor.measure('clearAll', async () => {
+            await this.adapter.clear();
+            this.cache.clear();
+        });
+    }
+    async clearCache() {
+        this.cache.clear();
+    }
+    async close() {
+        await this.adapter.close();
+        this.cache.clear();
+        this.performanceMonitor.clear();
+    }
+    getMetrics() {
+        return this.performanceMonitor.getMetrics();
+    }
+    setAdapter(adapter) {
+        this.adapter = adapter;
+    }
+    setOptimizationEnabled(enabled) {
+        this.optimizationEnabled = enabled;
+    }
+};
+
+/**
+ * Blob reader adapter for handling file uploads in browser environments
+ */
+class BlobReaderAdapter {
+    constructor() {
+        this.performanceMonitor = new PerformanceMonitor$1();
+    }
+    async readBlob(blob) {
+        return this.performanceMonitor.measure('readBlob', async () => {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    resolve(reader.result);
+                };
+                reader.onerror = () => {
+                    reject(new Error('Failed to read blob'));
+                };
+                reader.readAsText(blob);
+            });
+        });
+    }
+    async createDocumentFromBlob(blob, id, metadata = {}) {
+        return this.performanceMonitor.measure('createDocumentFromBlob', async () => {
+            try {
+                const content = await this.readBlob(blob);
+                const documentContent = { text: content };
+                // Create searchable document
+                const searchableDocument = {
+                    id,
+                    version: String(metadata.version || '1.0'),
+                    content: {
+                        content: documentContent,
+                        title: String(metadata.title || (blob instanceof File ? blob.name : '') || id),
+                        type: blob.type,
+                        size: blob.size
+                    },
+                    metadata: {
+                        lastModified: blob instanceof File ? blob.lastModified : Date.now(),
+                        ...metadata
+                    }
+                };
+                return searchableDocument;
+            }
+            catch (error) {
+                throw new Error(`Failed to create document from blob: ${error}`);
+            }
+        });
+    }
+    getMetrics() {
+        return this.performanceMonitor.getMetrics();
+    }
+}
+
+const defaultConfig = {
+    name: 'default',
+    version: 1,
+    fields: ['field1', 'field2'],
+    storage: {
+        type: 'memory',
+        options: {
+            prefix: 'nexus',
+            compression: false,
+            encryption: false,
+            backupEnabled: false
+        },
+        maxSize: 1000,
+        ttl: 3600
+    },
+    indexing: {
+        enabled: true,
+        fields: ['title', 'content'],
+        options: {
+            tokenization: true,
+            caseSensitive: false,
+            stemming: true,
+            stopWords: [
+                'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for',
+                'from', 'has', 'he', 'in', 'is', 'it', 'its', 'of', 'on',
+                'that', 'the', 'to', 'was', 'were', 'will', 'with'
+            ],
+            minWordLength: 2,
+            maxWordLength: 50
+        }
+    },
+    search: {
+        defaultOptions: {
+            fuzzy: true,
+            maxDistance: 2,
+            includeMatches: true,
+            caseSensitive: false,
+            maxResults: 10,
+            threshold: 0.5,
+            enableRegex: false
+        }
+    },
+    documentSupport: {
+        enabled: true,
+        versioning: {
+            enabled: false,
+            maxVersions: 10,
+            strategy: 'simple'
+        },
+        validation: {
+            required: ['title', 'content']
+        },
+        storage: {
+            type: 'memory',
+            options: {
+                prefix: 'nexus-docs'
+            }
+        }
+    },
+    plugins: []
+};
+// Environment-specific configurations
+({
+    ...defaultConfig,
+    storage: {
+        ...defaultConfig.storage},
+    indexing: {
+        ...defaultConfig.indexing,
+        options: {
+            ...defaultConfig.indexing.options}
+    }
+});
+({
+    ...defaultConfig,
+    storage: {
+        ...defaultConfig.storage,
+        options: {
+            ...defaultConfig.storage.options}
+    }
+});
+// Feature-specific configurations
+({
+    ...defaultConfig,
+    indexing: {
+        ...defaultConfig.indexing,
+        options: {
+            ...defaultConfig.indexing.options}
+    }
+});
+({
+    ...defaultConfig,
+    documentSupport: {
+        ...defaultConfig.documentSupport}
+});
+
+function validateConfigWithDetails$1(config) {
+    const errors = [];
+    if (!config || typeof config !== 'object') {
+        return {
+            valid: false,
+            errors: ['Configuration must be an object']
+        };
+    }
+    const typedConfig = config;
+    // Validate basic required fields
+    if (!typedConfig.name || typeof typedConfig.name !== 'string') {
+        errors.push('name is required and must be a string');
+    }
+    if (typeof typedConfig.version !== 'number') {
+        errors.push('version is required and must be a number');
+    }
+    if (!Array.isArray(typedConfig.fields) || typedConfig.fields.length === 0) {
+        errors.push('fields must be a non-empty array of strings');
+    }
+    else if (!typedConfig.fields.every(field => typeof field === 'string')) {
+        errors.push('all fields must be strings');
+    }
+    // Validate storage configuration
+    if (typedConfig.storage) {
+        const storageErrors = validateStorageConfig$1(typedConfig.storage);
+        errors.push(...storageErrors);
+    }
+    else {
+        errors.push('storage configuration is required');
+    }
+    // Validate indexing configuration
+    if (typedConfig.indexing) {
+        const indexingErrors = validateIndexingConfig$1(typedConfig.indexing);
+        errors.push(...indexingErrors);
+    }
+    else {
+        errors.push('indexing configuration is required');
+    }
+    // Validate search configuration
+    if (typedConfig.search) {
+        const searchErrors = validateSearchConfig$1(typedConfig.search);
+        errors.push(...searchErrors);
+    }
+    else {
+        errors.push('search configuration is required');
+    }
+    // Validate optional document support configuration
+    if (typedConfig.documentSupport) {
+        const docErrors = validateDocumentConfig$1(typedConfig.documentSupport);
+        errors.push(...docErrors);
+    }
+    // Validate optional plugins configuration
+    if (typedConfig.plugins !== undefined) {
+        if (!Array.isArray(typedConfig.plugins)) {
+            errors.push('plugins must be an array');
+        }
+        else {
+            typedConfig.plugins.forEach((plugin, index) => {
+                const pluginErrors = validatePluginConfig$1(plugin);
+                errors.push(...pluginErrors.map(err => `Plugin ${index}: ${err}`));
+            });
+        }
+    }
+    return {
+        valid: errors.length === 0,
+        errors
+    };
+}
+function validateStorageConfig$1(storage) {
+    const errors = [];
+    if (!['memory', 'indexeddb'].includes(storage.type)) {
+        errors.push('storage type must be either "memory" or "indexeddb"');
+    }
+    if (storage.maxSize !== undefined && (typeof storage.maxSize !== 'number' || storage.maxSize <= 0)) {
+        errors.push('storage maxSize must be a positive number');
+    }
+    if (storage.ttl !== undefined && (typeof storage.ttl !== 'number' || storage.ttl <= 0)) {
+        errors.push('storage ttl must be a positive number');
+    }
+    if (storage.options) {
+        const optionsErrors = validateStorageOptions$1(storage.options);
+        errors.push(...optionsErrors);
+    }
+    return errors;
+}
+function validateStorageOptions$1(options) {
+    const errors = [];
+    if (options.prefix !== undefined && typeof options.prefix !== 'string') {
+        errors.push('storage prefix must be a string');
+    }
+    if (options.compression !== undefined && typeof options.compression !== 'boolean') {
+        errors.push('storage compression must be a boolean');
+    }
+    if (options.encryption !== undefined && typeof options.encryption !== 'boolean') {
+        errors.push('storage encryption must be a boolean');
+    }
+    if (options.backupEnabled !== undefined && typeof options.backupEnabled !== 'boolean') {
+        errors.push('storage backupEnabled must be a boolean');
+    }
+    return errors;
+}
+function validateIndexingConfig$1(indexing) {
+    const errors = [];
+    if (typeof indexing.enabled !== 'boolean') {
+        errors.push('indexing enabled must be a boolean');
+    }
+    if (!Array.isArray(indexing.fields) || indexing.fields.length === 0) {
+        errors.push('indexing fields must be a non-empty array of strings');
+    }
+    else if (!indexing.fields.every(field => typeof field === 'string')) {
+        errors.push('all indexing fields must be strings');
+    }
+    if (indexing.options) {
+        const optionsErrors = validateIndexOptions$1(indexing.options);
+        errors.push(...optionsErrors);
+    }
+    else {
+        errors.push('indexing options are required');
+    }
+    return errors;
+}
+function validateIndexOptions$1(options) {
+    const errors = [];
+    if (typeof options.tokenization !== 'boolean') {
+        errors.push('indexing tokenization must be a boolean');
+    }
+    if (typeof options.caseSensitive !== 'boolean') {
+        errors.push('indexing caseSensitive must be a boolean');
+    }
+    if (typeof options.stemming !== 'boolean') {
+        errors.push('indexing stemming must be a boolean');
+    }
+    if (options.stopWords !== undefined && !Array.isArray(options.stopWords)) {
+        errors.push('indexing stopWords must be an array of strings');
+    }
+    if (options.minWordLength !== undefined &&
+        (typeof options.minWordLength !== 'number' || options.minWordLength < 1)) {
+        errors.push('indexing minWordLength must be a positive number');
+    }
+    if (options.maxWordLength !== undefined &&
+        (typeof options.maxWordLength !== 'number' || options.maxWordLength < 1)) {
+        errors.push('indexing maxWordLength must be a positive number');
+    }
+    if (options.customTokenizer !== undefined && typeof options.customTokenizer !== 'function') {
+        errors.push('indexing customTokenizer must be a function');
+    }
+    return errors;
+}
+function validateSearchConfig$1(search) {
+    const errors = [];
+    if (!search.defaultOptions) {
+        errors.push('search defaultOptions are required');
+    }
+    else {
+        const optionsErrors = validateSearchOptions$1(search.defaultOptions);
+        errors.push(...optionsErrors);
+    }
+    if (search.fuzzy !== undefined && typeof search.fuzzy !== 'boolean') {
+        errors.push('search fuzzy must be a boolean');
+    }
+    if (search.maxResults !== undefined &&
+        (typeof search.maxResults !== 'number' || search.maxResults < 1)) {
+        errors.push('search maxResults must be a positive number');
+    }
+    if (search.threshold !== undefined &&
+        (typeof search.threshold !== 'number' || search.threshold < 0 || search.threshold > 1)) {
+        errors.push('search threshold must be a number between 0 and 1');
+    }
+    if (search.boost !== undefined &&
+        (typeof search.boost !== 'object' ||
+            !Object.values(search.boost).every(v => typeof v === 'number'))) {
+        errors.push('search boost must be an object with number values');
+    }
+    return errors;
+}
+function validateSearchOptions$1(options) {
+    const errors = [];
+    if (options.fuzzy !== undefined && typeof options.fuzzy !== 'boolean') {
+        errors.push('searchOptions fuzzy must be a boolean');
+    }
+    if (options.maxDistance !== undefined &&
+        (typeof options.maxDistance !== 'number' || options.maxDistance < 1)) {
+        errors.push('searchOptions maxDistance must be a positive number');
+    }
+    if (options.includeMatches !== undefined && typeof options.includeMatches !== 'boolean') {
+        errors.push('searchOptions includeMatches must be a boolean');
+    }
+    if (options.caseSensitive !== undefined && typeof options.caseSensitive !== 'boolean') {
+        errors.push('searchOptions caseSensitive must be a boolean');
+    }
+    return errors;
+}
+function validateDocumentConfig$1(doc) {
+    const errors = [];
+    if (typeof doc.enabled !== 'boolean') {
+        errors.push('documentSupport enabled must be a boolean');
+    }
+    if (doc.versioning) {
+        const versioningErrors = validateVersioningConfig$1(doc.versioning);
+        errors.push(...versioningErrors);
+    }
+    if (doc.validation) {
+        const validationErrors = validateValidationConfig$1(doc.validation);
+        errors.push(...validationErrors);
+    }
+    if (doc.storage) {
+        const storageErrors = validateStorageConfig$1(doc.storage);
+        errors.push(...storageErrors);
+    }
+    return errors;
+}
+function validateVersioningConfig$1(versioning) {
+    const errors = [];
+    if (typeof versioning.enabled !== 'boolean') {
+        errors.push('versioning enabled must be a boolean');
+    }
+    if (versioning.maxVersions !== undefined &&
+        (typeof versioning.maxVersions !== 'number' || versioning.maxVersions < 1)) {
+        errors.push('versioning maxVersions must be a positive number');
+    }
+    if (versioning.strategy !== undefined &&
+        !['simple', 'timestamp', 'semantic'].includes(versioning.strategy)) {
+        errors.push('versioning strategy must be one of: simple, timestamp, semantic');
+    }
+    return errors;
+}
+function validateValidationConfig$1(validation) {
+    const errors = [];
+    if (validation.required !== undefined) {
+        if (!Array.isArray(validation.required)) {
+            errors.push('validation required must be an array of strings');
+        }
+        else if (!validation.required.every(field => typeof field === 'string')) {
+            errors.push('all validation required fields must be strings');
+        }
+    }
+    if (validation.customValidators !== undefined &&
+        (typeof validation.customValidators !== 'object' ||
+            !Object.values(validation.customValidators).every(v => typeof v === 'function'))) {
+        errors.push('validation customValidators must be an object with function values');
+    }
+    return errors;
+}
+function validatePluginConfig$1(plugin) {
+    const errors = [];
+    if (!plugin.name || typeof plugin.name !== 'string') {
+        errors.push('plugin name is required and must be a string');
+    }
+    if (typeof plugin.enabled !== 'boolean') {
+        errors.push('plugin enabled must be a boolean');
+    }
+    if (plugin.options !== undefined && typeof plugin.options !== 'object') {
+        errors.push('plugin options must be an object');
+    }
+    return errors;
+}
+function validateConfig(config) {
+    const result = validateConfigWithDetails$1(config);
+    return result.valid;
+}
+
+class NexusSearchConfig {
+    constructor(config = {}) {
+        var _a, _b;
+        // Merge with defaults
+        const mergedConfig = {
+            ...defaultConfig,
+            ...config
+        };
+        // Initialize required properties
+        this.name = mergedConfig.name;
+        this.version = mergedConfig.version;
+        this.fields = [...mergedConfig.fields];
+        // Initialize complex objects
+        this.storage = {
+            ...defaultConfig.storage,
+            ...mergedConfig.storage
+        };
+        this.indexing = {
+            ...defaultConfig.indexing,
+            ...mergedConfig.indexing,
+            options: {
+                ...defaultConfig.indexing.options,
+                ...(_a = mergedConfig.indexing) === null || _a === void 0 ? void 0 : _a.options
+            }
+        };
+        this.search = {
+            ...defaultConfig.search,
+            ...mergedConfig.search,
+            defaultOptions: {
+                ...defaultConfig.search.defaultOptions,
+                ...(_b = mergedConfig.search) === null || _b === void 0 ? void 0 : _b.defaultOptions
+            }
+        };
+        // Optional configurations
+        if (mergedConfig.documentSupport) {
+            this.documentSupport = {
+                ...defaultConfig.documentSupport,
+                ...mergedConfig.documentSupport
+            };
+        }
+        if (mergedConfig.plugins) {
+            this.plugins = mergedConfig.plugins.map((plugin) => {
+                var _a;
+                return ({
+                    ...plugin,
+                    enabled: (_a = plugin.enabled) !== null && _a !== void 0 ? _a : true
+                });
+            });
+        }
+        // Validate the configuration
+        if (!this.validate()) {
+            throw new Error('Invalid configuration');
+        }
+    }
+    /**
+     * Validates the configuration
+     */
+    validate() {
+        return validateConfig(this);
+    }
+    /**
+     * Converts configuration to JSON
+     */
+    toJSON() {
+        return {
+            name: this.name,
+            version: this.version,
+            fields: this.fields,
+            storage: this.storage,
+            indexing: this.indexing,
+            search: this.search,
+            documentSupport: this.documentSupport,
+            plugins: this.plugins
+        };
+    }
+    /**
+     * Creates configuration from JSON
+     */
+    static fromJSON(json) {
+        const config = typeof json === 'string' ? JSON.parse(json) : json;
+        return new NexusSearchConfig(config);
+    }
+    /**
+     * Creates configuration from file
+     */
+    static async fromFile(path) {
+        try {
+            const configModule = await import(path);
+            return new NexusSearchConfig(configModule.default || configModule);
+        }
+        catch (error) {
+            throw new Error(`Failed to load configuration from ${path}: ${error}`);
+        }
+    }
+    /**
+     * Merges multiple configurations
+     */
+    static merge(...configs) {
+        return new NexusSearchConfig(configs.reduce((merged, config) => ({
+            ...merged,
+            ...config
+        }), {}));
+    }
+    /**
+     * Creates a development configuration
+     */
+    static createDevConfig(options = {}) {
+        return new NexusSearchConfig({
+            ...defaultConfig,
+            storage: { type: 'memory' },
+            indexing: { ...defaultConfig.indexing, enabled: true },
+            search: {
+                ...defaultConfig.search,
+                defaultOptions: { ...defaultConfig.search.defaultOptions, fuzzy: true }
+            },
+            ...options
+        });
+    }
+    /**
+     * Creates a production configuration
+     */
+    static createProdConfig(options = {}) {
+        return new NexusSearchConfig({
+            ...defaultConfig,
+            storage: { type: 'indexeddb' },
+            indexing: { ...defaultConfig.indexing, enabled: true },
+            search: {
+                ...defaultConfig.search,
+                defaultOptions: { ...defaultConfig.search.defaultOptions, fuzzy: false }
+            },
+            ...options
+        });
+    }
+}
+
+function validateConfigWithDetails(config) {
+    const errors = [];
+    if (!config || typeof config !== 'object') {
+        return {
+            valid: false,
+            errors: ['Configuration must be an object']
+        };
+    }
+    const typedConfig = config;
+    // Validate basic required fields
+    if (!typedConfig.name || typeof typedConfig.name !== 'string') {
+        errors.push('name is required and must be a string');
+    }
+    if (typeof typedConfig.version !== 'number') {
+        errors.push('version is required and must be a number');
+    }
+    if (!Array.isArray(typedConfig.fields) || typedConfig.fields.length === 0) {
+        errors.push('fields must be a non-empty array of strings');
+    }
+    else if (!typedConfig.fields.every(field => typeof field === 'string')) {
+        errors.push('all fields must be strings');
+    }
+    // Validate storage configuration
+    if (typedConfig.storage) {
+        const storageErrors = validateStorageConfig(typedConfig.storage);
+        errors.push(...storageErrors);
+    }
+    else {
+        errors.push('storage configuration is required');
+    }
+    // Validate indexing configuration
+    if (typedConfig.indexing) {
+        const indexingErrors = validateIndexingConfig(typedConfig.indexing);
+        errors.push(...indexingErrors);
+    }
+    else {
+        errors.push('indexing configuration is required');
+    }
+    // Validate search configuration
+    if (typedConfig.search) {
+        const searchErrors = validateSearchConfig(typedConfig.search);
+        errors.push(...searchErrors);
+    }
+    else {
+        errors.push('search configuration is required');
+    }
+    // Validate optional document support configuration
+    if (typedConfig.documentSupport) {
+        const docErrors = validateDocumentConfig(typedConfig.documentSupport);
+        errors.push(...docErrors);
+    }
+    // Validate optional plugins configuration
+    if (typedConfig.plugins !== undefined) {
+        if (!Array.isArray(typedConfig.plugins)) {
+            errors.push('plugins must be an array');
+        }
+        else {
+            typedConfig.plugins.forEach((plugin, index) => {
+                const pluginErrors = validatePluginConfig(plugin);
+                errors.push(...pluginErrors.map(err => `Plugin ${index}: ${err}`));
+            });
+        }
+    }
+    return {
+        valid: errors.length === 0,
+        errors
+    };
+}
+function validateStorageConfig(storage) {
+    const errors = [];
+    if (!['memory', 'indexeddb'].includes(storage.type)) {
+        errors.push('storage type must be either "memory" or "indexeddb"');
+    }
+    if (storage.maxSize !== undefined && (typeof storage.maxSize !== 'number' || storage.maxSize <= 0)) {
+        errors.push('storage maxSize must be a positive number');
+    }
+    if (storage.ttl !== undefined && (typeof storage.ttl !== 'number' || storage.ttl <= 0)) {
+        errors.push('storage ttl must be a positive number');
+    }
+    if (storage.options) {
+        const optionsErrors = validateStorageOptions(storage.options);
+        errors.push(...optionsErrors);
+    }
+    return errors;
+}
+function validateStorageOptions(options) {
+    const errors = [];
+    if (options.prefix !== undefined && typeof options.prefix !== 'string') {
+        errors.push('storage prefix must be a string');
+    }
+    if (options.compression !== undefined && typeof options.compression !== 'boolean') {
+        errors.push('storage compression must be a boolean');
+    }
+    if (options.encryption !== undefined && typeof options.encryption !== 'boolean') {
+        errors.push('storage encryption must be a boolean');
+    }
+    if (options.backupEnabled !== undefined && typeof options.backupEnabled !== 'boolean') {
+        errors.push('storage backupEnabled must be a boolean');
+    }
+    return errors;
+}
+function validateIndexingConfig(indexing) {
+    const errors = [];
+    if (typeof indexing.enabled !== 'boolean') {
+        errors.push('indexing enabled must be a boolean');
+    }
+    if (!Array.isArray(indexing.fields) || indexing.fields.length === 0) {
+        errors.push('indexing fields must be a non-empty array of strings');
+    }
+    else if (!indexing.fields.every(field => typeof field === 'string')) {
+        errors.push('all indexing fields must be strings');
+    }
+    if (indexing.options) {
+        const optionsErrors = validateIndexOptions(indexing.options);
+        errors.push(...optionsErrors);
+    }
+    else {
+        errors.push('indexing options are required');
+    }
+    return errors;
+}
+function validateIndexOptions(options) {
+    const errors = [];
+    if (typeof options.tokenization !== 'boolean') {
+        errors.push('indexing tokenization must be a boolean');
+    }
+    if (typeof options.caseSensitive !== 'boolean') {
+        errors.push('indexing caseSensitive must be a boolean');
+    }
+    if (typeof options.stemming !== 'boolean') {
+        errors.push('indexing stemming must be a boolean');
+    }
+    if (options.stopWords !== undefined && !Array.isArray(options.stopWords)) {
+        errors.push('indexing stopWords must be an array of strings');
+    }
+    if (options.minWordLength !== undefined &&
+        (typeof options.minWordLength !== 'number' || options.minWordLength < 1)) {
+        errors.push('indexing minWordLength must be a positive number');
+    }
+    if (options.maxWordLength !== undefined &&
+        (typeof options.maxWordLength !== 'number' || options.maxWordLength < 1)) {
+        errors.push('indexing maxWordLength must be a positive number');
+    }
+    if (options.customTokenizer !== undefined && typeof options.customTokenizer !== 'function') {
+        errors.push('indexing customTokenizer must be a function');
+    }
+    return errors;
+}
+function validateSearchConfig(search) {
+    const errors = [];
+    if (!search.defaultOptions) {
+        errors.push('search defaultOptions are required');
+    }
+    else {
+        const optionsErrors = validateSearchOptions(search.defaultOptions);
+        errors.push(...optionsErrors);
+    }
+    if (search.fuzzy !== undefined && typeof search.fuzzy !== 'boolean') {
+        errors.push('search fuzzy must be a boolean');
+    }
+    if (search.maxResults !== undefined &&
+        (typeof search.maxResults !== 'number' || search.maxResults < 1)) {
+        errors.push('search maxResults must be a positive number');
+    }
+    if (search.threshold !== undefined &&
+        (typeof search.threshold !== 'number' || search.threshold < 0 || search.threshold > 1)) {
+        errors.push('search threshold must be a number between 0 and 1');
+    }
+    if (search.boost !== undefined &&
+        (typeof search.boost !== 'object' ||
+            !Object.values(search.boost).every(v => typeof v === 'number'))) {
+        errors.push('search boost must be an object with number values');
+    }
+    return errors;
+}
+function validateSearchOptions(options) {
+    const errors = [];
+    if (options.fuzzy !== undefined && typeof options.fuzzy !== 'boolean') {
+        errors.push('searchOptions fuzzy must be a boolean');
+    }
+    if (options.maxDistance !== undefined &&
+        (typeof options.maxDistance !== 'number' || options.maxDistance < 1)) {
+        errors.push('searchOptions maxDistance must be a positive number');
+    }
+    if (options.includeMatches !== undefined && typeof options.includeMatches !== 'boolean') {
+        errors.push('searchOptions includeMatches must be a boolean');
+    }
+    if (options.caseSensitive !== undefined && typeof options.caseSensitive !== 'boolean') {
+        errors.push('searchOptions caseSensitive must be a boolean');
+    }
+    return errors;
+}
+function validateDocumentConfig(doc) {
+    const errors = [];
+    if (typeof doc.enabled !== 'boolean') {
+        errors.push('documentSupport enabled must be a boolean');
+    }
+    if (doc.versioning) {
+        const versioningErrors = validateVersioningConfig(doc.versioning);
+        errors.push(...versioningErrors);
+    }
+    if (doc.validation) {
+        const validationErrors = validateValidationConfig(doc.validation);
+        errors.push(...validationErrors);
+    }
+    if (doc.storage) {
+        const storageErrors = validateStorageConfig(doc.storage);
+        errors.push(...storageErrors);
+    }
+    return errors;
+}
+function validateVersioningConfig(versioning) {
+    const errors = [];
+    if (typeof versioning.enabled !== 'boolean') {
+        errors.push('versioning enabled must be a boolean');
+    }
+    if (versioning.maxVersions !== undefined &&
+        (typeof versioning.maxVersions !== 'number' || versioning.maxVersions < 1)) {
+        errors.push('versioning maxVersions must be a positive number');
+    }
+    if (versioning.strategy !== undefined &&
+        !['simple', 'timestamp', 'semantic'].includes(versioning.strategy)) {
+        errors.push('versioning strategy must be one of: simple, timestamp, semantic');
+    }
+    return errors;
+}
+function validateValidationConfig(validation) {
+    const errors = [];
+    if (validation.required !== undefined) {
+        if (!Array.isArray(validation.required)) {
+            errors.push('validation required must be an array of strings');
+        }
+        else if (!validation.required.every(field => typeof field === 'string')) {
+            errors.push('all validation required fields must be strings');
+        }
+    }
+    if (validation.customValidators !== undefined &&
+        (typeof validation.customValidators !== 'object' ||
+            !Object.values(validation.customValidators).every(v => typeof v === 'function'))) {
+        errors.push('validation customValidators must be an object with function values');
+    }
+    return errors;
+}
+function validatePluginConfig(plugin) {
+    const errors = [];
+    if (!plugin.name || typeof plugin.name !== 'string') {
+        errors.push('plugin name is required and must be a string');
+    }
+    if (typeof plugin.enabled !== 'boolean') {
+        errors.push('plugin enabled must be a boolean');
+    }
+    if (plugin.options !== undefined && typeof plugin.options !== 'object') {
+        errors.push('plugin options must be an object');
+    }
+    return errors;
+}
+
+class TelemetryReporter {
+    constructor(telemetry) {
+        this.telemetry = telemetry;
+    }
+    generateMetricsReport(filter) {
+        const report = this.telemetry.getMetrics(filter);
+        let output = '# Metrics Report\n\n';
+        output += `Total metrics: ${report.summary.count}\n\n`;
+        // Add averages
+        output += '## Averages\n\n';
+        Object.entries(report.summary.averages).forEach(([key, value]) => {
+            output += `- ${key}: ${value.toFixed(2)}\n`;
+        });
+        // Add min/max
+        output += '\n## Min/Max Values\n\n';
+        output += '| Metric | Min | Max |\n';
+        output += '|--------|-----|-----|\n';
+        const keys = new Set([
+            ...Object.keys(report.summary.min),
+            ...Object.keys(report.summary.max)
+        ]);
+        Array.from(keys).sort().forEach(key => {
+            const min = report.summary.min[key] !== undefined
+                ? report.summary.min[key].toFixed(2)
+                : 'N/A';
+            const max = report.summary.max[key] !== undefined
+                ? report.summary.max[key].toFixed(2)
+                : 'N/A';
+            output += `| ${key} | ${min} | ${max} |\n`;
+        });
+        return output;
+    }
+    generateEventReport(filter) {
+        const report = this.telemetry.getEvents(filter);
+        let output = '# Events Report\n\n';
+        output += `Total events: ${report.summary.count}\n\n`;
+        // Add event counts by type
+        output += '## Event Counts\n\n';
+        output += '| Event Type | Count |\n';
+        output += '|------------|-------|\n';
+        Object.entries(report.summary.groupedCounts)
+            .sort((a, b) => b[1] - a[1])
+            .forEach(([type, count]) => {
+            output += `| ${type} | ${count} |\n`;
+        });
+        return output;
+    }
+    generateErrorReport(filter) {
+        const report = this.telemetry.getErrors(filter);
+        let output = '# Errors Report\n\n';
+        output += `Total errors: ${report.summary.count}\n\n`;
+        // Add error counts by type
+        output += '## Error Counts\n\n';
+        output += '| Error Type | Count |\n';
+        output += '|------------|-------|\n';
+        Object.entries(report.summary.groupedCounts)
+            .sort((a, b) => b[1] - a[1])
+            .forEach(([type, count]) => {
+            output += `| ${type} | ${count} |\n`;
+        });
+        return output;
+    }
+    generateFullReport() {
+        return [
+            this.generateMetricsReport(),
+            '',
+            this.generateEventReport(),
+            '',
+            this.generateErrorReport()
+        ].join('\n');
+    }
+}
+
+export { AlgoUtils, BaseDocument, BinaryProcessor, BlobReaderAdapter, CacheError, CacheManager, CacheStrategyType, Command as CommandModules, ConfigError, validateConfigWithDetails as ConfigValidator, Container, DataMapper, DocumentLink, DocumentProcessor, DocumentProcessorFactory, ErrorCollection, EventCollection, ExportCommand as ExportCommandModule, FileSystemAdapter, HTMLProcessor, ImportCommand as ImportCommandModule, IndexCommand as IndexCommandModule, IndexError, IndexManager$1 as IndexManager, IndexMapper, IndexTelemetry, IndexedDB, IndexedDBAdapter, IndexedDocument, MapperError, MarkdownProcessor, MemoryStorageAdapter, MetricsCollection, NexusSearchConfig, PerformanceError, PerformanceMonitor$1 as PerformanceMonitor, PlainTextProcessor, QueryProcessor, Registry, ScoringUtils, SearchCLI, SearchCLI as SearchCLIDefault, SearchCommand as SearchCommandModule, SearchCursor, SearchEngine, SearchError, SearchEventError, SearchStorage, ServiceIdentifiers, StorageAdapterFactory, StorageError, IndexManager as StorageIndexManager, StorageManager$1 as StorageManager, TelemetryReporter, TrieNode, TrieSearch, TrieSpatialIndex, ValidationError, bfsRegexTraversal$1 as bfsRegexTraversal, bfsTraversal, calculateFuzzyScore, calculateLevenshteinDistance$1 as calculateLevenshteinDistance, calculateScore, createIndexedDocument, createMockDocument, createMockDocuments, createSearchableFields, createTestDocument, defaultContainer, defaultConfig as defaults, dfsRegexTraversal$1 as dfsRegexTraversal, dfsTraversal, extractMatches, fuzzySearchRecursive, generateSortKey, getNestedValue, isPotentialFuzzyMatch, normalizeFieldValue, optimizeIndex, priorityFuzzyMatch, registerCoreServices, sortObjectKeys, bfsRegexTraversal as utilBfsRegexTraversal, dfsRegexTraversal as utilDfsRegexTraversal, validateDocument, validateIndexConfig, validateSearchOptions$2 as validateSearchOptions };
 //# sourceMappingURL=index.js.map
