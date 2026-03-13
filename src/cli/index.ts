@@ -2,9 +2,13 @@
 // Entry point for the nscli / nsc binary (dist/cli/index.js).
 // Shebang (#!/usr/bin/env node) is injected by rollup's banner config.
 
-// ─── Library export ───────────────────────────────────────────────────────────
+// ─── CLI library export ──────────────────────────────────────────────────────
 export { SearchCLI } from './search-cli';
 export { default as SearchCLIDefault } from './search-cli';
 
-// ─── Command stubs (tree-aligned with nexus-search-tree.txt) ─────────────────
+// ─── Command exports ─────────────────────────────────────────────────────────
 export * from './commands';
+
+// ─── Core surface passthrough ───────────────────────────────────────────────
+// This ensures nscli / nsc can consume every core API from a single entrypoint.
+export * from '../core/index';
